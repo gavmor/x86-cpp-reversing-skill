@@ -156,6 +156,13 @@ sign your comparison technique is wrong -- some functions genuinely aren't
 separate functions anymore, and hunting for a missing one in the optimized
 binary is often a waste of time.
 
+When a function does still correspond and you need to confirm two builds
+behave the same way, compare what each writes -- to memory, globals, I/O --
+not the raw instruction sequence: PEM (Xu et al., ESEC/FSE 2023) defines a
+binary's semantics as exactly this distribution of observable writes
+because "observable values are hardly altered by code transformations,"
+unlike register-level traces, which optimization reshuffles freely.
+
 ## 9. Reversing a custom binary file-format loader (no vtables involved)
 
 Not every 32-bit binary worth reversing has a C++ class hierarchy. Old game
