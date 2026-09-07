@@ -107,6 +107,73 @@ natural nested branches) -- recognize the *shape* (one big switch/dispatch
 loop where you'd expect nested control flow) even without a worked example
 here.
 
+**String hiding.** Constructing a string byte-by-byte at runtime
+(`mov byte ptr [ebx], 'h'` / `mov byte ptr [ebx+1], 'e'` / ...) rather than
+storing it as a literal defeats `strings`/IDA string search entirely --
+there's no contiguous ASCII run in the binary to find. A comparison can be
+hidden the same way (`cmp byte ptr [ebx], 'j'` / `jnz fail` / `cmp byte ptr
+[ebx+1], 'o'` / ... character-by-character rather than one string compare),
+and a split-argument `sprintf(buf, "%s%c%s%c%s", "hel", 'l', "o w", 'o',
+"rld")` reads as nonsense until you notice it reassembles a fixed string
+(Yurichev, *Reverse Engineering for Beginners*, ch. 50.1). If you can't find
+a resource name, sound cue, or debug string you're fairly sure must exist
+somewhere in the binary, check for this before concluding it isn't there.
+
+**Indirect-pointer and bloated-instruction xref evasion.** Two more named
+techniques from the same source that specifically defeat *static
+cross-reference sweeps* (directly relevant to this skill's own xref-sweep-
+heavy methodology in tool-recipes.md section 10) -- see tool-recipes.md
+section 10.1 for the worked examples: computing a real target via `add`/
+`lea` off an unrelated anchor symbol (ch. 50.2.5), and substituting a direct
+`call`/`jmp` with an equivalent `push`+`ret` sequence specifically because
+"IDA will not show the references to the label" (ch. 50.2.2).
+
+## Disassembler desync vs. deliberate obfuscation
+
+A related but distinct problem: a disassembler that has genuinely lost sync
+(started decoding mid-instruction, or followed a bad jump target) can
+produce output that looks obfuscated without any obfuscation being present
+at all. Named signals for recognizing desync specifically (Yurichev, ch.
+49):
+
+- **Unusually diverse instruction mix in one place** -- FPU, `IN`/`OUT`, or
+  privileged/system instructions all clustered together in what should be
+  ordinary application code. Real compiled code from a single function
+  essentially never mixes these; seeing them together is a much stronger
+  signal of misaligned decoding than of real obfuscation.
+- **Big or seemingly random immediates and offsets** that don't correspond
+  to any plausible constant, address, or struct offset.
+- **Jumps landing mid-instruction** relative to how the surrounding code was
+  decoded -- if re-disassembling from a jump's target produces a completely
+  different (and more sensible) instruction stream than continuing linearly
+  through the bytes, the linear decode was wrong, not the code.
+
+If you hit one of these, try re-disassembling from a different, more
+certain starting point (a known function boundary, an xref-confirmed call
+target) before concluding the binary is obfuscated -- the fix is often just
+picking a better start address, not defeating an obfuscator.
+
+## Suspicious code patterns as heuristics (not proof)
+
+Two low-cost signals worth checking before spending time on a block, from
+Yurichev ch. 61:
+
+- **`XOR reg, reg` with a large or mismatched second operand elsewhere
+  nearby** is a common tell for hand-rolled checksum/crypto/hashing code
+  rather than compiler output -- with one common exception: a stack-canary
+  XOR (`xor ecx, ebp` or similar against the stack cookie), which is
+  compiler-generated and looks superficially similar. Check whether the
+  value being XORed traces back to `__security_cookie`/a stack slot set up
+  in the prologue before treating it as hand-written.
+- **`LOOP`, `RCL`, a missing standard prologue/epilogue, or a
+  non-standard calling convention** together are a signal that a function
+  was hand-written in assembly rather than compiler-generated -- compilers
+  essentially never emit `LOOP` (it's slower than the `dec`/`jnz` pairs
+  compilers actually generate) and rarely emit `RCL`. Worth flagging in a
+  report as "likely hand-written," which changes how much weight to put on
+  compiler-convention assumptions (frame layout, calling convention) for
+  that specific function.
+
 ## Tools (survey, not endorsement -- verify current API before use)
 
 - **VMProtect, CodeVirtualizer** -- commercial VM-based obfuscators/packers.

@@ -224,6 +224,26 @@ clean, directly-called symbol:
   the underlying data instead -- the table's base symbol or the offset
   computation pattern (`lea <reg>, [<index_reg>*<stride> + <table_base>]`) --
   rather than from a function that doesn't exist as a standalone symbol.
+- **Indirect-pointer xref evasion (deliberate or not).** An xref sweep can
+  come up empty even for a real, statically-computable target if the
+  reference isn't a direct pointer: `mov eax, offset dummy_anchor` followed
+  by `add eax, 0x100` reaches the real data, but a static xref tool
+  (including IDA, not just this skill's usual tools) shows a reference only
+  to `dummy_anchor`, never to the real target address (Yurichev, *Reverse
+  Engineering for Beginners*, ch. 50.2.5). If a resource table or string you
+  expect to be referenced has zero xrefs, check nearby code for an `add`/
+  `lea` applied to an unrelated anchor symbol before concluding the
+  reference doesn't exist in code at all.
+- **Bloated-instruction xref evasion.** A direct `call`/`jmp` to a symbol is
+  what static xref sweeps actually detect; substituting equivalent
+  instruction sequences defeats this specifically: `jmp label` as
+  `push label` / `ret`, or `call label` as `push return_addr` / `push
+  label` / `ret` -- same runtime effect, but "IDA will not show the
+  references to the label" (same source, ch. 50.2.2) because there's no
+  `call`/`jmp` opcode pointing at it to find. If you see a `push` of what
+  looks like a code address immediately followed by `ret`, treat it as a
+  disguised `call`/`jmp` and resolve the target manually rather than relying
+  on the xref sweep to have found it.
 - **Virtual-call indirection (vtable dispatch).** Harder than the fixed
   fn-ptr-slot case above: a call like `call dword ptr [eax+14h]` dispatches
   through a *per-instance* vtable pointer, not one fixed global address --
@@ -315,6 +335,25 @@ next one:
    out which field offset within each record holds the id. The call site you
    started from tells you almost nothing further; the table's layout does.
 
+   **Watch for padding when computing a field's real size.** MSVC (and GCC)
+   default to aligning every struct field to its natural boundary (a
+   `char`/`short` field still occupies a full 4-byte-aligned slot, with the
+   unused bytes left as uninitialized garbage -- confirmed via a real
+   compiled example in Yurichev, *Reverse Engineering for Beginners*, ch.
+   21.4). The tell is in how the field is *read*: `movsx`/`movzx` on a
+   sub-dword width means the real field is smaller than its apparent slot,
+   and the remaining bytes in that slot are padding, not part of the value
+   -- don't mistake them for a second field. Wire-format structs (the kind
+   section 9 recovers from a file loader) are the opposite case: they're
+   usually declared with `#pragma pack(1)` or `pshpack1.h` specifically to
+   avoid this padding, since the loader needs a byte-for-byte match with the
+   file's layout, and the *disassembly of the packed and unpacked versions
+   is otherwise indistinguishable* (same source) -- you can't tell a struct
+   is packed from the code alone, only from the field offsets/strides
+   actually observed. Same skill, opposite default: expect padding when
+   recovering an in-memory C++ object's fields (this section), expect none
+   when recovering a file-format struct (section 9).
+
 ### 10.4 Attribute the call site to an owner
 
 - **RTTI/vtable path (when available).** If the call site is inside a member
@@ -402,6 +441,23 @@ disruptive, log the same tuple without stopping execution instead:
   confirm a given toolkit's architecture support before adopting it, rather
   than assuming a modding library that looks applicable actually targets
   your bitness.
+- **`tracer` (Windows, lightweight, IDA-integrated).** Dennis Yurichev's
+  `tracer.exe` is a simpler alternative to Pin/WinDbg scripting for this
+  exact job on Windows. A non-stopping logging breakpoint is one line:
+
+  ```
+  tracer.exe -l:target.exe bpf=target.exe!0x<addr>
+  ```
+
+  which dumps register state at every hit without stopping (*Reverse
+  Engineering for Beginners*, ch. 23.1.2). More useful for section 10.3's
+  backward-slicing case: `bpf=target.exe!0x<addr>,trace:cc` produces an IDC
+  script that, loaded into IDA, annotates the disassembly *inline* with
+  every concretely observed register value at that instruction across the
+  run, and visibly grays out instructions that were never executed (ch.
+  23.1.3) -- a distinct payoff from GDB/WinDbg/Pin's plain log files: you
+  get traced values directly in the disassembly view you're already reading
+  the resource-access API in.
 
 **IDA/IDC vtable-xref script (resolves the 10.1 virtual-call-indirection
 case).** If you have IDA Pro, this fully automates recovering real callers
