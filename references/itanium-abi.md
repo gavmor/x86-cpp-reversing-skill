@@ -166,7 +166,44 @@ and doesn't bother filling it in. Don't read a null slot in an abstract
 base's vtable as "corrupted binary" or "missing destructor" -- check whether
 the class has a pure virtual member before assuming something's wrong.
 
-## Confirming polymorphism dynamically (when static analysis stalls)
+## A more rigorous vtable-identification rule set (VPS)
+
+`scripts/recon.py` and the manual `nm`/`objdump` recipes in
+`references/tool-recipes.md` find vtables the common-case way (symbol names,
+or scanning `.rodata`/`.data.rel.ro`). VPS (Pawlowski et al., ACSAC 2019,
+§4.1) built a more exhaustive rule set for the same problem as part of a
+binary-level CFI defense, and it's worth knowing the edge cases it names
+even when you're doing this by hand rather than running their tool:
+
+- **Vtables aren't always in the main binary's own sections.** If a base
+  class lives in another module, the loader **copy-relocates** the vtable
+  data into `.bss`; if referenced through position-independent code, the
+  reference may go through the **GOT** instead of pointing at the vtable
+  directly. Grepping only `.rodata`/`.data.rel.ro` will silently miss both
+  cases.
+- **The vtable reference doesn't always point at slot 0.** Some compiled
+  code references the *metadata* field at `vtable - 0x10` (or `-0x18` under
+  virtual inheritance) instead of the first function entry -- common in PIC
+  -- and then adds `0x10`/`0x18` back before use. If a "vtable pointer"
+  candidate is 0x10 or 0x18 bytes off from where you expect slot 0, check
+  for this adjustment before concluding it's the wrong address.
+- **Offset-to-top has a validated sane range: `[-0xFFFFFF, 0xFFFFFF]`.** A
+  candidate header value outside that range is not a real offset-to-top
+  field -- useful as a concrete sanity check when you're not sure a
+  candidate address is actually a vtable header.
+- **The RTTI pointer field is optional, not always present.** It's usually
+  omitted by the compiler; when present for a class inheriting from another
+  module, it may be a relocation entry rather than a direct pointer into
+  `.data`.
+- **Copy relocation + multiple inheritance is a real edge case worth
+  knowing about, not just a theoretical one.** The loader's copy relocation
+  only records where the copied chunk *starts* and how long it is -- it
+  doesn't separately mark each sub-vtable's boundary within that chunk. If
+  you know the chunk is `N` bytes copied to address `A`, every 8-byte-aligned
+  address (4-byte-aligned on 32-bit x86, per VPS's own note on porting to
+  that architecture) from `A` to `A+N` is a *candidate* vtable/sub-vtable --
+  over-approximating and then discarding the ones that don't validate is
+  the correct approach, not assuming only `A` itself matters.
 
 If symbols are stripped, break at a suspected constructor and watch what
 gets written to `[this]`:

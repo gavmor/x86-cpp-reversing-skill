@@ -6,6 +6,10 @@ Ground truth synthesized from:
 - CMU SEI Pharos / OOAnalyzer (`libpharos/datatypes.hpp`, `share/prolog/oorules/rtti.pl`)
 - Bruce Dang, Alexandre Gazet, Elias Bachaalany, Sebastien Josse, *Practical Reverse Engineering* (Wiley 2014)
 - Dennis Yurichev, *Reverse Engineering for Beginners* (ch. 51.1.1)
+- Andre Pawlowski, Victor van der Veen, Dennis Andriesse, Erik van der Kouwe,
+  Thorsten Holz, Cristiano Giuffrida, *VPS: Excavating High-Level C++
+  Constructs from Low-Level Binaries to Protect Dynamic Dispatching* (ACSAC
+  2019)
 
 ## Calling convention: `__thiscall`
 
@@ -29,12 +33,39 @@ mov  eax, [ecx]          ; load vptr (at offset 0 of object)
 call [eax + <slot*4>]    ; dispatch through vftable slot
 ```
 
+**Why `ecx`-before-a-call is an unusually strong signal on this ABI
+specifically (not just a convenient one).** VPS's own false-positive
+evaluation of virtual-callsite pattern matching (§4.3.1, discussion at the
+end of §4.3) found their static pattern produces real false positives
+against ordinary indirect calls on Linux x86/x86-64 -- but notes that prior
+work targeting **Windows x86 reported none**, and gives the mechanism: on
+Windows x86, `thiscall` passes `this` in ECX while ordinary (non-member)
+indirect calls use `stdcall`, which passes arguments on the stack --
+different register-vs-stack conventions for member vs. non-member calls.
+On Linux/x86-64 and Windows x64, by contrast, *all* calls (member or not)
+use the same standard calling convention for the first argument, so seeing
+"the expected register holds the first argument" doesn't distinguish a
+virtual call from an ordinary indirect call nearly as well. This is the
+reverse of a plausible-sounding-but-wrong intuition (that thiscall's
+ECX-loading is ambiguous with normal calls) -- it's actually the reason
+this skill's pattern-match is more reliable on MSVC/PE than the same idea
+would be on Itanium/Linux binaries.
+
 **Key Constructor / Destructor Identifiers:**
 - **Constructors return `this` in EAX:** A standard MSVC constructor ends with
   `mov eax, ecx` (or `mov eax, [ebp-X]` where `this` was spilled). In OOAnalyzer
   terms, this fact is `returnsSelf(Method)`.
 - **Top-of-function vptr store:** Constructors stamp the object's vptr immediately
   after base construction: `mov dword ptr [esi], offset ??_7ClassName@@6B@`.
+- **Inlined constructors may stage the vptr through a stack temp first.**
+  VPS (§4.2) observed compilers sometimes store the vtblptr into a temporary
+  stack variable, then write it into the object from there, rather than
+  writing it directly -- an artifact of constructor inlining. Don't stop
+  tracking a vptr's data flow at the first store; if that store target is a
+  stack slot rather than the object itself, keep following it. VPS's own
+  approach deliberately over-approximates here (it can't always tell a
+  temporary stack variable from a real stack-allocated object, so it treats
+  both as "keep tracking") rather than risk missing a real vptr write.
 - **Order of execution:** Base constructors run before derived constructors;
   derived destructors run before base destructors.
 

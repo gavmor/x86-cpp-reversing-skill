@@ -379,6 +379,32 @@ next one:
   directly -- cross-check against `references/itanium-abi.md` or
   `references/msvc-abi.md`. This is the common case and needs no further
   technique.
+- **Static alternative to section 10.6's IDC vtable-xref script (VPS).**
+  If you don't have IDA, or want a static answer without running the
+  target, VPS (Pawlowski et al., ACSAC 2019, §4.3.2) gives a three-stage
+  procedure for tracing a virtual call's `vtblptr` back to the constructor
+  that wrote it, without executing anything:
+  1. **Data-flow graph, backwards, from both ends.** Starting from *every*
+     vtable-referencing instruction (which creates a `vtblptr`) and *every*
+     virtual-call candidate (which uses one), track data flow backward
+     through the code -- interprocedurally, through argument/return
+     registers, using SSA form. A vtable-write and a call-site that share
+     the same ultimate data source are a candidate match.
+  2. **Verify with a real control-flow path**, not just a shared data
+     source. Shared ancestry alone doesn't prove the `vtblptr` created at
+     one site is actually the one consumed at the other -- translate the
+     data-flow connection into an actual CFG path between the two
+     instructions and confirm one exists.
+  3. **Confirm with symbolic execution.** Replace the `vtblptr` with a
+     symbolic value at the write site, symbolically execute along the
+     verified path (skipping into unrelated calls rather than exploring
+     them), and check the symbolic value is what's actually used at the
+     call site.
+
+  This is the static counterpart to the dynamic breakpoint script in
+  section 10.6 -- reach for the IDC script when you can run the target and
+  want an immediate, concrete answer; reach for this when you can't run it,
+  or when you want to verify a match rather than just observe one.
 - **Stripped MSVC fallback (no RTTI).** When the enclosing function's own
   name is unavailable:
   - Nearby string literals in the same function (level names, debug
