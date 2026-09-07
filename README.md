@@ -9,7 +9,10 @@ Built for agent use: `SKILL.md` is the entry point an agent reads, written so th
 | Area | Automated? | Where |
 |---|---|---|
 | ELF/Itanium ABI (GCC/Clang, `_Z`-mangled): vtables, RTTI, multiple/virtual inheritance | Yes -- `scripts/recon.py` | `references/itanium-abi.md` |
-| PE/MSVC ABI (`?`-mangled): thiscall, vftable, Complete Object Locator | Manual recipe only (no MSVC toolchain to validate an automated pass against), but the layout is cross-verified against multiple independent sources plus a real compiler-generated worked example | `references/msvc-abi.md` |
+| PE/MSVC ABI (`?`-mangled): `__thiscall`, vftable, Complete Object Locator, `vbtable`, stripped `.rdata` scanning | Manual / Scripted | `references/msvc-abi.md` |
+| Automated C++ class recovery via OOAnalyzer (Pharos / SWI-Prolog) | Yes -- CLI / JSON | `references/tool-recipes.md` §12 |
+| Data-table field attribution and struct recovery (stride analysis, displacement envelopes, type inference) | Manual recipe (REWARDS/TIE) | `references/tool-recipes.md` §13 |
+| Programmatic binary analysis (immediate xref sweepers, recursive disassembly, boundary detection) | Scriptable (Python + Capstone + LIEF) | `references/tool-recipes.md` §14 |
 | Custom binary file-format loaders (no C++ classes involved) | Manual recipe | `references/tool-recipes.md` §9 |
 | Resource-binding recovery: mapping a data file's indexed entries to the code/owner that uses them | Manual recipe + `scripts/backward_slice.py` (Triton-based backward slicing) | `references/tool-recipes.md` §10 |
 | WinDbg/DbgEng dynamic analysis (native Windows PE binaries GDB can't attach to) | Manual recipe | `references/tool-recipes.md` §11 |
@@ -34,13 +37,13 @@ Claude Code will pick it up automatically for prompts like "what does this .exe 
 ## Repo layout
 
 ```
-SKILL.md                    entry point: workflow, triage steps, output format
+SKILL.md                    entry point: workflow, triage steps, anti-rationalization table, exit criteria
 AGENTS.md                   instructions for agents editing this repo's own content
 scripts/recon.py            LIEF-based static triage + Itanium ABI vtable/RTTI recovery
 scripts/backward_slice.py   Triton-based backward slicing (needs its own venv, see above)
 references/itanium-abi.md   ELF/Itanium ABI details
 references/msvc-abi.md      PE/MSVC ABI details
-references/tool-recipes.md  concrete commands, by task (triage through §11)
+references/tool-recipes.md  concrete commands, by task (triage through §14)
 references/obfuscation.md   recognizing deliberate obfuscation
 references/anti-debugging.md recognizing anti-debugging techniques
 ```

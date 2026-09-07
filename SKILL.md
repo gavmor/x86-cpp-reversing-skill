@@ -1,168 +1,131 @@
 ---
 name: x86-cpp-reversing
-description: Reverse-engineer 32-bit little-endian x86 (IA-32) binaries and disassembly compiled from C++ -- recover class layouts, vtables, virtual dispatch, RTTI/inheritance hierarchies, and demangled symbol names from ELF or PE binaries. Combines radare2/r2pipe, LIEF, GDB, and binutils (objdump/readelf/nm/c++filt) so analysis stays in structured/JSON form and decompiled-level abstraction rather than raw token-heavy asm dumps. Use this whenever the user shares an x86 binary, .exe/.o/.elf/.so file, a disassembly or objdump dump, or asks to analyze, reverse engineer, or decompile a compiled C++ program, recover a class hierarchy or vtable, demangle C++ symbols, identify virtual function dispatch, or explain what a 32-bit binary does -- even if they don't say "reverse engineering" explicitly (e.g. "what does this .exe do", "can you figure out the class structure from this binary", "why does this crash inside a virtual call").
+description: Reverse-engineer 32-bit little-endian x86 (IA-32) binaries and disassembly compiled from C++ -- recover class layouts, vtables, virtual dispatch, RTTI/inheritance hierarchies, and demangled symbol names from ELF or PE binaries. Combines radare2/r2pipe, LIEF, GDB, WinDbg, and binutils (objdump/readelf/nm/c++filt) so analysis stays in structured/JSON form and decompiled-level abstraction rather than raw token-heavy asm dumps. Use this whenever the user shares an x86 binary, .exe/.o/.elf/.so file, a disassembly dump, or asks to analyze, reverse engineer, or decompile a compiled C++ program, recover a class hierarchy or vtable, demangle C++ symbols, identify virtual function dispatch, or explain what a 32-bit binary does.
 ---
 
 # x86 C++ Reverse Engineering
 
-## Why the approach here looks the way it does
+## Overview
 
-For an LLM doing binary analysis, the real bottleneck is context, not
-compute: a raw `objdump -d` of anything nontrivial burns tokens fast and
-buries the two or three instructions that actually matter. So the order of
-preference throughout this skill is: **structured data > prose text**, and
-**demangled/decompiled abstraction > raw assembly**. `scripts/recon.py`
-exists specifically to front-load the mechanical, well-specified parts (ABI
-struct layouts, relocation resolution, symbol demangling) into one JSON blob
-so you spend your reasoning on the parts that actually require judgment --
-what the recovered classes are *for*, how they relate to the program's
-behavior, what looks suspicious.
+Reverse-engineers 32-bit little-endian x86 (IA-32) binaries compiled from C++. Front-loads mechanical ABI metadata extraction (vtable layouts, RTTI structures, base-class graphs, and symbol demangling) into structured JSON rather than burning context on raw assembly dumps. Degrades gracefully from automated tooling (`recon.py`, LIEF, radare2, OOAnalyzer) to standard binutils (`objdump`, `readelf`, `nm`, `c++filt`) and debuggers (`gdb`, `windbg`).
 
-That said, this skill degrades gracefully. If the fancy tools (radare2,
-LIEF, r2pipe) aren't installed and can't be installed in the current
-environment, binutils (`objdump`/`readelf`/`nm`/`c++filt`) and GDB are
-almost always present on any Linux box and are enough to do this by hand --
-`references/tool-recipes.md` covers both paths.
+## When to Use
 
-## Workflow
+- Analyzing 32-bit x86 ELF (`.so`, executables) or PE (`.exe`, `.dll`) binaries.
+- Recovering C++ class hierarchies, member layouts, and virtual function tables.
+- Identifying and resolving dynamic virtual call sites (`call [eax + slot]`).
+- Reconstructing custom file-format loaders or flat procedural data tables.
+- Mapping resource indices to code call sites (resource-binding recovery).
+- Deciphering obfuscated assembly or anti-debugging mechanisms.
 
-**1. Identify the artifact and triage it.**
-Figure out whether you have a binary file, an object file, or already-pasted
-disassembly/objdump text. Run `file` and `readelf -h` (or check a PE header)
-to confirm the binary is actually **32-bit** and **little-endian** x86
-before trusting anything else -- the struct offsets everywhere in this skill
-assume 4-byte words. If it's 64-bit or a different architecture, stop and
-say so rather than silently misapplying 32-bit offsets.
+**When NOT to use:**
+- 64-bit binaries (x86-64 / AMD64) — 4-byte pointer assumptions and ABI headers do not apply.
+- Binaries in non-native languages (e.g. .NET/C#, Java bytecode, Python bytecode).
+- Pure assembly without C++ abstractions or data structures where generic triage suffices.
 
-**1b. No vtables? It may be flat procedural C, not missing C++.** Old game
-engines especially often implement a subsystem (audio, save format, level
-data) as a static-globals C library with no classes at all -- `recon.py`
-correctly finding zero vtables is a valid result, not a failure. If the task
-is really "recover a custom file format this binary loads," pivot to
-`references/tool-recipes.md` section 9 (tracing from the `open`/`read` call
-site to the real validator, which is often hidden one call behind a thin
-SEH/error-string wrapper).
+---
 
-**1c. Know a data file has N indexed entries but not which code uses entry
-K?** That's resource-binding recovery, not class recovery or file-format
-recovery -- a distinct technique (xref-sweep outward from the
-resource-access API, not from a vtable or a container-open call). Pivot to
-`references/tool-recipes.md` section 10.
+## Core Non-Negotiables (Defensive Engineering)
 
-**1d. Disassembly looks nonsensical, or a function seems to fix up the stack
-right after its own entry point with no matching call?** Before assuming a
-disassembler bug or an unusual compiler, check whether the binary is
-deliberately obfuscated -- see `references/obfuscation.md` for named,
-recognizable patterns (a `call` that never returns to its next instruction,
-opaque predicates, junk code built to desync a linear disassembler,
-clusters of instructions compilers rarely emit). Recognizing the pattern is
-usually enough to stop wasting time trying to make normal sense of code
-that was never meant to make sense when read linearly.
+1. **Surface Assumptions Early:** State bitness, endianness, and suspected ABI explicitly before doing deep disassembly. Confirming `ELFCLASS32` or `PE32` little-endian avoids chasing phantom offsets.
+2. **Process Over Prose:** Follow the phased workflow with concrete verification gates. Do not generate speculative essays on what code "might" do without instruction-level proof.
+3. **Scope Discipline:** Touch and disassemble only the functions and structures requested. Do not dump or decompile adjacent, unrelated subsystems.
+4. **Verification is Non-Negotiable:** "Seems right" is never sufficient. Every recovered class, vtable slot, and member displacement must link to an exact opcode, relocation, or memory address.
+5. **Structured Data Over Raw Asm:** Prefer structured output (`recon.py` JSON, `r2` JSON, backward slices) over raw text dumps. Raw `objdump -d` of 500-line functions burns context and buries key instructions.
 
-**1e. A debugger attached in section 7/10.6/11 behaves differently than the
-binary does standalone (crashes, takes a different path, or the target
-just exits)?** The binary may be detecting the debugger, not misbehaving --
-see `references/anti-debugging.md` for named techniques (PEB `BeingDebugged`
-checks, kernel-debugger queries, trap-flag detection, code checksumming)
-before spending time debugging your own tooling.
+---
 
-**1f. Need to reconstruct structs, tables, or records in stripped binaries with no symbols?**
-Pivot to `references/tool-recipes.md` section 13 for data-table field attribution
-and manual struct recovery -- deriving element sizes from loop strides, bounding struct
-extents by displacement envelopes, and typing fields by instruction constraints (REWARDS/TIE).
+## Anti-Rationalization Table
 
-**1g. Reversing a complex 32-bit MSVC PE binary with many classes and virtual calls?**
-Consider automated static recovery via OOAnalyzer (Pharos) -- see `references/tool-recipes.md`
-section 12 for CLI and JSON workflow to automate class layouts and virtual call site resolution.
+| Common Rationalization / Excuse | Hard Reality & Required Action |
+|---|---|
+| *"The binary is stripped, so classes and vtables cannot be recovered."* | **False.** Stripped binaries preserve vptr stores (`mov [esi], offset vtable`) in constructors and mangled `.?AV...` ASCII strings in `.rdata`. Follow the stripped `.rdata` recovery algorithm in `references/msvc-abi.md` or data-table attribution in `references/tool-recipes.md` §13. |
+| *"This binary was run/analyzed on Linux, so it must use the Itanium ABI."* | **Stop.** Check file format and symbol markers (`_Z` vs `?`). PE binaries running under Wine or analyzed on Linux strictly follow the MSVC ABI (`__thiscall`, `CompleteObjectLocator`). Never apply Itanium vtable offsets to MSVC binaries. |
+| *"I can just read pointer values directly out of `.rodata` / `.data` bytes."* | **False for PIE/DSO targets.** Position-independent binaries use dynamic relocations for vtables and RTTI pointers. Raw bytes are often placeholder zeroes. You MUST check the relocation table (`readelf -r` or LIEF). |
+| *"I'll dump the whole 500-line function disassembly into context."* | **Context poison.** Use targeted disassembly (`objdump -d --start-address=...`), radare2 JSON (`pdfj`), or backward slicing (`scripts/backward_slice.py`). Focus only on vptr assignments, loop strides, and call setups. |
+| *"Static xref sweeps returned 0 hits, so this code or table is dead."* | **Premature.** Check for indirect dispatch via function-pointer tables, `vbtable` adjustments, dynamic registration, or thin SEH wrappers before concluding code is unreferenced. |
+| *"The decompiled output looks like a flat C struct, so there is no inheritance."* | **Check calling conventions.** Compilers inline constructors. Look for `thiscall` (`ecx` loaded prior to call), `returnsSelf` (`eax == ecx`), and nested subobject offsets (`lea ecx, [esi + disp]`). |
+| *"I don't need to verify against two sources; one textbook/blog said so."* | **Verify primary sources.** Disassembly transcriptions in literature frequently contain errata (e.g. missing `cdOffset` fields or wrong vptr targets). Corroborate against verified schemas in `references/msvc-abi.md`. |
 
-**2. Tell ELF/Itanium apart from PE/MSVC -- the ABI is genuinely different.**
-Symbols starting with `_Z` (demangle with `c++filt`) mean Itanium ABI,
-almost always an ELF binary from GCC/Clang. Symbols starting with `?` mean
-MSVC's ABI, almost always a PE binary. Calling convention, vtable layout,
-name mangling, and RTTI structures differ between the two -- read
-`references/itanium-abi.md` or `references/msvc-abi.md` accordingly rather
-than assuming one applies to the other.
+---
 
-**3. Run the structured recon script (ELF/Itanium binaries).**
-```bash
-python3 <skill_dir>/scripts/recon.py <binary>
+## Phased Workflow
+
 ```
-This gives you binfo (confirming step 1), every symbol demangled, and --
-for ELF binaries -- every `_ZTV*` vtable already walked: offset-to-top,
-resolved typeinfo with the full base-class chain (including multiple/virtual
-inheritance), and each virtual function slot resolved to a demangled name
-where possible. Cross-DSO pointers (e.g. a typeinfo structure whose "kind"
-vtable lives in libstdc++) are resolved through the relocation table rather
-than misread from placeholder bytes -- see `references/itanium-abi.md` if
-you need to understand why a raw pointer field doesn't look like a real
-address.
+[Artifact] ──→ Phase 1: Triage ──→ Phase 2: ABI Split ──→ Phase 3: Structural Recon
+                                                                 │
+[Verified Model] ◄── Phase 6: Verify ◄── Phase 5: Functions ◄── Phase 4: Class Model
+```
 
-This script does **not** attempt MSVC/PE vtable walking automatically (the
-layout is different enough, and there's no way to validate it against a
-real MSVC-built binary in most environments, that guessing would produce
-confidently wrong answers instead of no answer). For PE binaries, use the
-manual recipe in `references/msvc-abi.md` and `references/tool-recipes.md`.
+### Phase 1: Triage & Format Gate
+**Gate:** Confirm 32-bit (`ELFCLASS32` or `PE32`) and little-endian (`e_data: 2's complement, little endian`).
+- Run `file <binary>` and `readelf -h <binary>`.
+- If 64-bit or big-endian, **STOP** — the 4-byte pointer arithmetic throughout this skill will produce invalid offsets.
+- **Pivots:**
+  - *Flat procedural code (no vtables)?* $\rightarrow$ `references/tool-recipes.md` §9 (custom loaders) or §13 (data-table field attribution).
+  - *Indexed resource binding?* $\rightarrow$ `references/tool-recipes.md` §10.
+  - *Obfuscated instructions / desynced disasm?* $\rightarrow$ `references/obfuscation.md`.
+  - *Debugger detects attachment / crashes?* $\rightarrow$ `references/anti-debugging.md`.
 
-If `recon.py` can't run at all (no LIEF installed and installing it isn't an
-option), go straight to the manual recipes in `references/tool-recipes.md`
-section 3-4 -- slower, but it gets you the same information.
+### Phase 2: ABI Disambiguation
+- **Itanium C++ ABI (`_Z`-prefixed symbols):** GCC / Clang (typically ELF). `this` passed on stack; vtable header contains offset-to-top and direct RTTI pointer. Pivot to `references/itanium-abi.md`.
+- **MSVC ABI (`?`-prefixed symbols or `.?AV` strings):** Visual C++ (typically PE). `__thiscall` convention (`this` in ECX); vtable slot 0 has COL pointer at offset `-4`. Pivot to `references/msvc-abi.md`.
 
-**4. Reconstruct the class model from what recon.py (or the manual recipe) found.**
-Match vtable symbols to class names, use the typeinfo base-class chain to
-build the inheritance graph, and note anything that looks like multiple or
-virtual inheritance (multiple `marker_or_secondary_header` segments in one
-vtable's slots, or `non-virtual thunk to`/`virtual thunk to` in demangled
-names). A `marker_or_secondary_header` entry isn't a bug in the output --
-it's the ABI-mandated header (offset-to-top + typeinfo pointer) for the next
-sub-vtable segment; `references/itanium-abi.md` walks through exactly this
-with a worked multiple-inheritance example.
+### Phase 3: Structural Reconnaissance
+- **ELF/Itanium Binaries:**
+  ```bash
+  python3 scripts/recon.py <binary>
+  ```
+  Extracts binfo, demangled symbols, and walks every `_ZTV` vtable and RTTI descriptor into structured JSON.
+- **MSVC/PE Binaries:**
+  - If OOAnalyzer is installed: `ooanalyzer --json=out.json <binary.exe>` (`references/tool-recipes.md` §12).
+  - Manual/Scripted: Scan `.rdata` for `.?AV` strings $\rightarrow$ trace COL pointers $\rightarrow$ find slot 0 at `col_ptr + 4` (`references/msvc-abi.md`).
+- **Fallback (binutils only):** `nm -C`, `objdump -s -j .data.rel.ro`, and `references/tool-recipes.md` §3–4.
 
-**5. Read specific functions when you need actual logic, not just structure.**
-Vtables and RTTI tell you the *shape* of the class hierarchy; you still need
-to read constructors (to confirm which vtable belongs to which class and in
-what order bases get initialized) and any function whose behavior the user
-actually asked about. Use `objdump -d -M intel --disassemble=<name>` or
-`r2`'s `pdf`/`pdfj` (see `references/tool-recipes.md` section 5-6) rather
-than dumping the whole `.text` section.
+### Phase 4: Class Model Reconstruction
+- Correlate vtables to class names via RTTI descriptors.
+- Map base-class inheritance graphs:
+  - *Itanium:* Walk `__si_class_type_info` and `__vmi_class_type_info` base arrays.
+  - *MSVC:* Traverse `ClassHierarchyDescriptor` $\rightarrow$ `BaseClassArray` $\rightarrow$ `BaseClassDescriptor` (evaluate `_PMD` member displacements).
+- Verify primary vftables using the self-referencing circular invariant (`rTTISelfRef`).
 
-**6. Go dynamic when static analysis stalls.**
-Stripped binaries, obfuscated control flow, or just wanting to *confirm*
-rather than infer a hypothesis are all good reasons to reach for GDB:
-breaking at a suspected constructor and watching the store to the object's
-first field will show you the vtable pointer(s) actually being written,
-including the base-then-derived double-write that's a dead giveaway of
-inheritance. See `references/tool-recipes.md` section 7.
+### Phase 5: Targeted Function Analysis
+- Disassemble constructors: confirm which vtable belongs to which class via `mov [reg], offset vtable` and note base ctor ordering.
+- Trace virtual call sites: find `call [reg + slot*4]` and match against the resolved vtable slot addresses.
+- Analyze struct fields: use memory displacements (`[esi + disp]`) and loop strides to map struct members (`references/tool-recipes.md` §13).
 
-## Output format
+### Phase 6: Dynamic Verification & Slicing (When Stalled)
+- GDB dynamic tracing for ELF/Linux (`references/tool-recipes.md` §7).
+- WinDbg dynamic tracing for native PE/Windows (`references/tool-recipes.md` §11).
+- Automated register backward slicing via Triton (`scripts/backward_slice.py` / §10.3).
 
-Produce **both** of the following unless the user clearly only wants one:
+---
 
-1. **A markdown report** covering, at minimum:
-   - File info: format, architecture, bitness/endianness, PIE/stripped status
-   - Recovered class model: table or list of classes, their vtables, and
-     inheritance relationships (with virtual/multiple inheritance called out
-     explicitly when present)
-   - Key functions: what they do, in terms of the recovered class model, not
-     just "this function calls that function"
-   - Anything notable or unusual for a reverse engineer to flag (unexpected
-     stripping, packed sections, obfuscation, etc.)
-2. **An annotated artifact** saved alongside the input: either an annotated
-   disassembly listing or a C-like pseudocode reconstruction, with inline
-   comments tying instructions back to the class model (e.g. "-- vptr store:
-   Dog's vtable, confirms Dog inherits Animal" next to the relevant `mov`).
+## Verification & Hard Exit Criteria
 
-Keep the report's structural claims traceable to specific evidence (an
-address, a symbol name, a relocation) rather than stated as bare assertions
--- that's what makes the report checkable against the binary later.
+Before declaring the reverse engineering task complete, verify that you have produced concrete evidence satisfying all of the following:
 
-## Reference files
+1. **Format Confirmation:** Stated bitness, format, endianness, and ABI classification with supporting triage command output.
+2. **Recovered Class / Structure Table:**
+   - Class name, size (if determinable), and vftable address.
+   - Inheritance relationships (single, multiple, virtual) with exact base offset displacements.
+   - Virtual method table mapping: slot index, virtual offset, and target function address/symbol.
+3. **Disassembly Ground Truth:**
+   - Every claimed vtable or struct field assignment is supported by exact instruction snippets (e.g. `0x00401234: mov dword ptr [esi], 0x00408040`).
+4. **Dual Output Deliverables:**
+   - **Markdown Report:** Synthesized architecture, class hierarchy, and behavior explanation.
+   - **Annotated Artifact:** Pseudocode or assembly listing saved alongside the report with inline comments tying machine instructions back to the recovered model.
+
+---
+
+## Reference Map
 
 | File | Read this when... |
 |---|---|
-| `references/itanium-abi.md` | Working with `_Z`-mangled (GCC/Clang, usually ELF) binaries -- vtable layout, RTTI structure decoding, multiple inheritance thunks, the abstract-class null-slot gotcha, cross-DSO relocation handling. |
+| `references/itanium-abi.md` | Working with `_Z`-mangled (GCC/Clang, ELF) binaries -- vtable layout, RTTI structures, multiple inheritance thunks, cross-DSO relocations. |
 | `references/msvc-abi.md` | Working with `?`-mangled (MSVC, PE) binaries -- `__thiscall` convention, complete RTTI struct definitions (COL, CHD, BCD, `_PMD`), circular validation invariant (`rTTISelfRef`), virtual inheritance/`vbtable` mechanics, and stripped `.rdata` scanning algorithm. |
-| `references/tool-recipes.md` | You need the exact command for a specific job -- triage, symbol dumping, per-function disassembly, radare2/r2pipe JSON queries, GDB dynamic-analysis recipes, compiling your own reference binary for comparison, reversing a custom file-format loader (section 9), mapping a data file's indexed entries to the code that uses them (section 10), WinDbg/DbgEng dynamic analysis (section 11), OOAnalyzer automated class recovery (section 12), data-table field attribution and struct recovery (section 13), or programmatic binary analysis recipes (section 14). |
-| `references/obfuscation.md` | Disassembly looks deliberately nonsensical (junk code, calls that never return, stack fixups with no matching call), or a resource/string you're sure exists has zero xrefs -- recognizing common obfuscation and xref-evasion patterns rather than mistaking them for disassembler or compiler bugs. |
-| `references/anti-debugging.md` | A debugger behaves differently attached than the binary does standalone -- recognizing named anti-debugging techniques (PEB checks, kernel-debugger queries, trap-flag detection, disassembler-algorithm-specific evasion) before assuming your tooling is broken. |
-| `scripts/recon.py` | Run directly (not just read) against ELF binaries for automated binfo + demangled symbols + full vtable/RTTI recovery. `python3 scripts/recon.py <binary>` with no args prints usage. |
-| `scripts/backward_slice.py` | Run directly against a 32-bit ELF or PE binary to automate backward-slicing a register at a given address (tool-recipes.md section 10.3) instead of tracing it by hand. Requires a dedicated venv (`pip install triton-library lief`) -- see the script's docstring for why. |
+| `references/tool-recipes.md` | Exact commands for: triage, demangling, radare2/r2pipe JSON queries, GDB dynamic recipes, custom file-format loaders (§9), resource-binding recovery (§10), WinDbg dynamic analysis (§11), OOAnalyzer automated class recovery (§12), data-table field attribution and struct recovery (§13), and programmatic binary analysis (§14). |
+| `references/obfuscation.md` | Recognizing deliberate obfuscation: junk code, opaque predicates, calls that never return, desynced linear disassembly, and xref-evasion patterns. |
+| `references/anti-debugging.md` | Debugger attached behaves differently than standalone: PEB `BeingDebugged` checks, kernel queries, trap flags, and evasion techniques. |
+| `scripts/recon.py` | Automated LIEF-based static triage + Itanium ABI vtable/RTTI recovery script. |
+| `scripts/backward_slice.py` | Automated Triton-based register backward slicing tool (requires dedicated `.venv`). |
