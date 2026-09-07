@@ -96,6 +96,46 @@ array of `BaseClassDescriptor`, each carrying an offset and attribute flags
 different bit layout) -- this is the part to treat as "verify by hand"
 before relying on any specific decoded offset value.
 
+**Cross-verified** (this layout is no longer purely a hypothesis): the
+5-field `CompleteObjectLocator` and the vptr-points-at-slot-0/COL-at-`-4`
+layout above are corroborated by multiple independent modern sources
+(the `pelite` Rust crate's `RTTICompleteObjectLocator`, retdec's
+`rtti_msvc.h`, and Lukasz Lipski's "RTTI Internals in MSVC"), not just this
+skill's own reasoning. A real MSVC 2008 `/FAs`-generated listing for a
+single-inheritance class (`class box : public object`), reproduced from
+Yurichev, *Reverse Engineering for Beginners*, ch. 51.1.1, shows concrete
+field values worth having as a worked example:
+
+```asm
+??_R1A@?0A@EA@box@@8 DD FLAT:??_R0?AVbox@@@8 ; BaseClassDescriptor at (0,-1,0,64)
+    DD  01H        ; numContainedBases = 1
+    DD  00H        ; mdisp = 0
+    DD  0ffffffffH ; pdisp = -1 (not a virtual base)
+    DD  00H        ; vdisp = 0
+    DD  040H       ; attributes = 0x40
+    DD  FLAT:??_R3box@@8  ; -> ClassHierarchyDescriptor
+
+??_R2box@@8 DD FLAT:??_R1A@?0A@EA@box@@8 ; BaseClassArray: box, then...
+    DD  FLAT:??_R1A@?0A@EA@object@@8     ; ...its base, object
+
+??_R3box@@8 DD 00H  ; ClassHierarchyDescriptor: attributes = 0
+    DD  02H         ; numBaseClasses = 2 (box + object)
+    DD  FLAT:??_R2box@@8  ; -> BaseClassArray
+```
+
+**Caution -- even this doesn't survive unquestioned.** The book's own
+transcription of the `CompleteObjectLocator` itself (`??_R4box@@6B@`) shows
+only 4 `DD` lines where the 5-field struct above predicts 5 (the `cdOffset`
+line appears to have been dropped), and attaches the `??_7box@@6B@`
+(vftable) label to the line holding the COL pointer rather than the line
+holding the first function pointer -- which would contradict the
+vptr-points-at-slot-0 claim if taken literally. Cross-checking against the
+other three sources above resolves this in favor of the standard layout;
+treat it as a transcription slip in one book, not a real ABI variant. This
+is exactly the "verify against more than one source" lesson `AGENTS.md`
+already asks for, applied to an example that could easily have been copied
+in wrong.
+
 ## Multiple/virtual inheritance
 
 Same high-level idea as Itanium (a derived class can have multiple vftables,
