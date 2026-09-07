@@ -134,6 +134,22 @@ gdb -q ./test32                        # or objdump/recon.py the result
 directly (`objdump --dwarf=decodedline`), which is often faster than
 reasoning from the assembly alone when you control the source.
 
+**If you compile your reference at a higher `-O` level to match an
+optimized target, expect functions to vanish or merge, not just get
+harder to read.** REFORGE (Koller & Schmidt, §4.2) measured *why*
+binary-to-source alignment degrades at higher optimization: inlining and
+code motion fragment the debug-info address ranges that anchor a function
+to its source, and their paired analysis (same function tracked across
+optimization levels via a source-anchored key, not independent samples)
+found no robust evidence that surviving functions get harder to match --
+the real effect is that ~40% of the function population stops being
+independently identifiable at all (inlined into callers, folded, or
+eliminated as dead code). Practical takeaway: if your `-O0` and `-O2`
+reference builds don't have a 1:1 function correspondence, that's not a
+sign your comparison technique is wrong -- some functions genuinely aren't
+separate functions anymore, and hunting for a missing one in the optimized
+binary is often a waste of time.
+
 ## 9. Reversing a custom binary file-format loader (no vtables involved)
 
 Not every 32-bit binary worth reversing has a C++ class hierarchy. Old game
@@ -319,6 +335,20 @@ next one:
    unrelated to anything in this recipe. The script detects and reports this
    case rather than silently misbehaving, but avoiding it with a venv is
    simpler than debugging it.
+
+   **`angr` is a legitimate alternative symbolic-execution engine** if
+   Triton's straight-line emulation model doesn't fit (e.g. you want
+   automatic path exploration across branches rather than the single
+   concrete path `backward_slice.py` follows). REMaQE (Udeshi et al.,
+   NYU Tandon) builds its equation-recovery pipeline on `angr` for exactly
+   this reason -- worth citing `angr` itself as the real, installable tool,
+   not REMaQE, which has no public code release. REMaQE also names a
+   concrete limitation worth carrying over to any symbolic-execution-based
+   technique in this skill: function pointers, recursion, and obfuscated
+   control flow (`references/obfuscation.md`) all "run into the path
+   explosion problem of symbolic execution" -- if a slice or trace hangs or
+   explodes in state count, check whether the code you're tracing through
+   has one of these, rather than assuming the tool is broken.
 3. **`this`-relative / thiscall argument.** Under MSVC thiscall (see
    `references/msvc-abi.md`), the index may come from the object itself:
    `mov eax, [ecx+<off>]` followed by `push eax` means the *field offset*
@@ -436,6 +466,17 @@ confirmed rows (a literal push, a captured runtime log, a direct RTTI match)
 visually distinct from inferred ones (nearby strings, behavioral smell test)
 -- the whole point of this deliverable is that a later reader can tell which
 rows to trust without re-deriving them.
+
+**Prefer naming the specific reason over a bare confirmed/inferred flag
+when you can.** REFORGE's benchmark methodology (Table 1) grades binary-
+to-source alignment through eight named gates rather than one pass/fail
+bit -- each failure is attributed to a specific cause ("ambiguous or failed
+binary-to-source mapping," "unresolved indirect jumps in control flow",
+etc.), not just "low confidence." Do the same in the `note` column: not
+"inferred" alone, but *which* of section 10.4's fallback techniques
+produced the row (e.g. "nearby string only," "behavioral smell test,"
+"single indirect xref, unresolved") -- a future reader deciding whether to
+trust a row needs to know why it's uncertain, not just that it is.
 
 ### 10.6 Dynamic capture -- often higher-yield than static slicing
 
