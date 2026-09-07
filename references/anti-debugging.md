@@ -67,6 +67,38 @@ function's own code bytes and comparing against an expected value --
 catches both a software breakpoint (`0xCC` byte patched into the code) and
 any other in-memory patch, not just a debugger's presence.
 
+**Anti-debug techniques from a real commercial packer (Safengine),
+confirmed bitness-agnostic by the source.** Choi, Chang & Park (*Sensors*,
+2024, §3.9/§5.4, building `UnSafengine64`) document these directly against
+Safengine 2.4.0 -- their own text notes "the single step is an anti-
+reversing technique that can be used in both 32-bit and 64-bit Windows,"
+and the rest read the same way (none depend on 64-bit-specific APIs):
+
+- **`NtSetInformationThread` with `ThreadInformationClass=0x11`
+  (`ThreadHideFromDebugger`)** silently detaches an attached debugger --
+  the target keeps running with no crash or visible error, so "the
+  debugger just stopped working" is itself a signal to check for this.
+- **Removing write access from a code section** specifically blocks
+  `0xCC` software-breakpoint patching (a debugger can't write the
+  breakpoint byte in) without touching execution -- a section that's
+  unexpectedly read/execute-only where you'd expect read/write/execute is
+  worth treating as deliberate.
+- **DR0-DR3 checksummed into TLS, monitored continuously by dedicated
+  "watchdog" threads** (eight of them, in Safengine's case) -- rather than
+  a one-shot check, this catches a hardware breakpoint set *after* the
+  program already passed an initial check.
+- **`\\.\NTICE` / `SYSERBOOT` driver-presence checks** extend the
+  SoftICE-detection pattern above to a differently-named but same-shaped
+  check (SoftICE/Syser driver device-file probing).
+- **Patching `DbgBreakPoint()`/`DbgUserBreakPoint()`'s first byte to
+  `0xEB`** (an unconditional short jump) neuters the OS's own built-in
+  breakpoint-trigger functions at their source, before a debugger ever
+  gets a chance to intercept them.
+- **VM detection via the system-manufacturer registry string** (checking
+  for literal substrings like `"VMware, Inc."` or `"VBOX"`) -- simple,
+  and worth checking for before assuming a more exotic timing- or
+  instruction-based VM-detection technique is in play.
+
 ## Debugging past these techniques instead of just recognizing them
 
 Everything above is about *recognizing* a check. When the target actually

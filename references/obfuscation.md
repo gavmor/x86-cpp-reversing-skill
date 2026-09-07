@@ -177,6 +177,51 @@ Yurichev ch. 61:
   compiler-convention assumptions (frame layout, calling convention) for
   that specific function.
 
+## Packers: unpacking methodology (not just recognizing one)
+
+A packer is a different mechanism from the hand-crafted obfuscation
+above -- it wraps/encrypts the real code and reconstructs it in memory at
+runtime, often defended by the anti-debug techniques in
+`references/anti-debugging.md`. Choi, Chang & Park (*Sensors*, 2024)
+built `UnSafengine64`, a Pin-based unpacker for the Safengine packer, and
+their own conclusion states it "currently cannot run a 32-bit version of
+Safengine" -- so cite the *techniques* below for a 32-bit target protected
+by a different packer, not the tool itself.
+
+- **Finding the OEP (original entry point) via write-and-execute
+  detection**, generalized from Renovo: track every memory region the
+  packer *writes to* at runtime, and flag the first time execution jumps
+  into a region that was written after the process started. That's the
+  unpacked code taking over from the packer stub -- architecture- and
+  packer-independent, since it doesn't depend on any packer's specific
+  obfuscated entry sequence.
+- **Resolving obfuscated API calls via "run-until-API"**: rather than
+  statically reversing a decrypt-then-jump stub, let it run and stop when
+  execution actually reaches a real, named API function. The paper states
+  this explicitly generalizes "to de-obfuscate API function calls in other
+  commercial protectors, including Themida or VMProtect" -- not a
+  Safengine-only trick.
+- **A rebuilt IAT can be a decoy.** In the unpacked binary, the Import
+  Address Table can look intact and correct while never actually being
+  read at runtime -- "Safengine does not read and use the IAT but directly
+  calls the obfuscated API functions... reserved for compatibility."
+  Don't trust that a structure exists and looks right as proof it's
+  actually used; confirm with a read/write-access trace if it matters.
+- **Don't trust one signature-matching tool alone.** Detect It Easy (DIE)
+  identifies packers via a signature database, but "some malware uses
+  Safengine's unique signature to cheat DIE" -- deliberately mimicking
+  another packer's signature to mislead automated identification. Cross-
+  check a DIE (or any signature-based) identification against structural
+  analysis (IDA/r2) rather than taking it as final.
+- **Engineering caveats if you build your own DBI-based unpacker**:
+  delay writing instrumentation logs to disk rather than flushing per
+  event -- the paper notes frequent I/O itself can stall or disrupt an
+  aggressive packer's own execution ("Safengine occasionally stops when
+  I/O occurs frequently"). And budget memory generously: full-instruction
+  tracing up to the OEP took "approximately 27 GB of memory" against this
+  one packer -- a real cost, not a rounding error, if you're logging every
+  instruction rather than sampling.
+
 ## Tools (survey, not endorsement -- verify current API before use)
 
 - **VMProtect, CodeVirtualizer** -- commercial VM-based obfuscators/packers.
