@@ -317,9 +317,14 @@ For a long play session where an attached interactive debugger is too
 disruptive, an inline hook that logs the same tuple to a file without
 stopping execution is a viable lower-overhead alternative -- game-modding
 toolkits built around AOB (array-of-bytes) signature scanning plus inline
-hooking (e.g. `tkhquang/DetourModKit`) exist specifically for this pattern:
-scan for the call site's byte signature, install a hook that logs and calls
-through, then play normally.
+hooking exist specifically for this pattern: scan for the call site's byte
+signature, install a hook that logs and calls through, then play normally.
+(`tkhquang/DetourModKit` implements this well -- `StringXref`/
+`xref_broad_match` for anchor-based call-site discovery, `mid_at()` for a
+logging-then-continuing mid-function hook -- but it's a **Windows x64**
+toolkit; treat it as a reference for the pattern, not a tool to run directly
+against a 32-bit target. Port the AOB-scan-plus-mid-hook idea rather than the
+library itself.)
 
 **Differential technique:** trigger one in-game event repeatedly (open the
 same door, walk into the same water tile) and diff the captured index sets
