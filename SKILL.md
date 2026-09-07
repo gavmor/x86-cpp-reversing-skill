@@ -49,6 +49,7 @@ Reverse-engineers 32-bit little-endian x86 (IA-32) binaries compiled from C++. F
 | *"I characterised the asset payloads statistically, so I know how the entries relate."* | **Wrong tool.** Grouping/pairing/looping structure usually lives in a **parallel per-entry metadata table** shipped alongside the container (§10.9), not in the payload. Signal analysis of payloads yields confident, plausible, wrong answers to data-structure questions. |
 | *"The decompiled output looks like a flat C struct, so there is no inheritance."* | **Check calling conventions.** Compilers inline constructors. Look for `thiscall` (`ecx` loaded prior to call), `returnsSelf` (`eax == ecx`), and nested subobject offsets (`lea ecx, [esi + disp]`). |
 | *"I don't need to verify against two sources; one textbook/blog said so."* | **Verify primary sources.** Disassembly transcriptions in literature frequently contain errata (e.g. missing `cdOffset` fields or wrong vptr targets). Corroborate against verified schemas in `references/msvc-abi.md`. |
+| *"The pseudocode preserves the decompiler's structure closely, so it's a faithful, done artifact."* | **Structural fidelity isn't readability.** Preserving `var_48`/`param_2`-style names, raw hex literals, and manual pointer arithmetic maximizes similarity to the decompiler's output while leaving it just as hard to read as before — a measured failure mode of agents optimizing for one metric (Archibald & Thijssen, 2026). Check the exit criterion below before calling the artifact done. |
 
 ---
 
@@ -117,7 +118,11 @@ Before declaring the reverse engineering task complete, verify that you have pro
    - Every claimed vtable or struct field assignment is supported by exact instruction snippets (e.g. `0x00401234: mov dword ptr [esi], 0x00408040`).
 4. **Dual Output Deliverables:**
    - **Markdown Report:** Synthesized architecture, class hierarchy, and behavior explanation.
-   - **Annotated Artifact:** Pseudocode or assembly listing saved alongside the report with inline comments tying machine instructions back to the recovered model.
+   - **Annotated Artifact:** Pseudocode or assembly listing saved alongside the report with inline comments tying machine instructions back to the recovered model. Before calling it done, check it against each of the following -- a "yes" on any is a specific, fixable readability defect, not a stylistic nitpick (Archibald & Thijssen, *LLM Agent-Assisted Reverse Engineering with Quantitative Readability Metrics*, 2026):
+     - Does it still carry decompiler-artifact names (`var_48`, `param_2`, `iVar1`) anywhere a real name is derivable from the recovered class/field model?
+     - Does it use a raw hex/magic-number literal where a named constant or enum value from the recovered model would read clearer?
+     - Does it use manual pointer arithmetic (`*(p + 4)`) where array/field indexing (`p[1]`, `p->field`) says the same thing more clearly?
+     - Does it contain a `goto`, or nesting/branching structure that doesn't reflect the actual recovered control flow?
 
 ---
 
