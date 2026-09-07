@@ -92,6 +92,32 @@ If you see a thunk like this, you're looking at multiple inheritance and the
 adjustment constant tells you the sub-object's offset within the derived
 class layout.
 
+**This assumes ordinary separate compilation -- whole-program/LTO builds
+can break it.** Ducournau (*ACM Computing Surveys*, 2011, §6-7) documents
+concrete global-compilation optimizations that change the shape above when
+the whole program is known at compile time (the "closed-world assumption"):
+**devirtualization can merge subobjects**, partitioning inheritance so it
+becomes diamond-free and eliminating sub-vtables naive MI would predict;
+**inherited-but-unoverridden methods can be physically duplicated per
+subclass** ("method code is duplicated with a factor... close to ten in
+our benchmarks") so multiple distinct vtable slots point at *different*
+copies of what was one source method, not the same address; and **a
+pointer-typed attribute can be inlined as an embedded value** in the
+object layout rather than a real pointer, when type/alias analysis proves
+it's safe. None of this applies to an ordinary MSVC/GCC build without
+whole-program optimization -- but if a binary's MI layout looks smaller or
+stranger than expected, LTO-style global compilation is a real, named
+reason, not just a sign you've misread something.
+
+**Absence of a vtable pointer at offset 0 doesn't rule out a statically
+typed OO language.** Same source, §7.2: "The GNU Eiffel compiler is...
+based on global compilation without method tables. In the object layout,
+the pointer to the method table is replaced by the class identifier" --
+dispatch happens via a bare class ID plus a binary-tree or perfect-hash
+lookup, not a vtable pointer at all. Not applicable to C++ specifically
+(this skill's actual scope), but worth knowing before concluding an
+unfamiliar binary "isn't object-oriented" just because it has no vptr.
+
 ## Virtual inheritance: extra words before offset-to-top, and `virtual thunk to`
 
 Everything above assumes no virtual bases anywhere in the hierarchy. The
