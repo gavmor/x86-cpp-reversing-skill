@@ -600,12 +600,12 @@ from a Python script via `pwntools`' `gdb.debug()` (section 7).
 ## 12. Automated C++ class recovery with OOAnalyzer (CMU SEI / Pharos)
 
 For 32-bit x86 Windows PE binaries compiled by MSVC, the Pharos framework's
-`ooanalyzer` (`git@github.com:cmu-sei/pharos.git`) automates what would
-otherwise take days of manual assembly tracing. It extracts ground facts using
-ROSE and evaluates them using a SWI-Prolog reasoning engine
-(`share/prolog/oorules/*.pl`).
+`ooanalyzer` (`github.com/cmu-sei/pharos`) automates what would otherwise
+take days of manual assembly tracing. It extracts ground facts using ROSE
+and evaluates them using a SWI-Prolog reasoning engine
+(`share/prolog/oorules/*.pl` -- 28 files, confirmed against the real repo).
 
-### Capabilities verified from primary source (`ooanalyzer.pod`, `datatypes.hpp`)
+### Capabilities (per `ooanalyzer.pod`)
 - Reconstructs complete C++ class hierarchies, inheritance trees, and member layouts.
 - Identifies constructors, destructors, and method associations.
 - **Virtual Call Resolution:** Resolves indirect virtual calls (`call [eax + slot]`)
@@ -622,24 +622,75 @@ ooanalyzer --json=recovered_classes.json <binary.exe>
 ooanalyzer --json=out.json --prolog-facts=facts.pl --prolog-results=results.pl <binary.exe>
 ```
 
-### Inspecting Results (`jq`)
+### Inspecting Results (`jq`) -- confirmed against `share/prolog/oorules/oojson.pl`
 
-**The field names below are unverified -- `ooanalyzer.pod` documents that
-the JSON output describes class member layout, method/class assignment,
-inheritance, and constructors/destructors, but does not publish a field-
-level schema, and no schema was confirmed against this skill's own primary-
-source-verification norm (`AGENTS.md`). Run `ooanalyzer --json=out.json
-<binary.exe>` and inspect the actual output structure yourself (`jq '.'
-out.json | head -100`, or `jq 'keys'` on a few nested objects) before
-trusting the specific paths below -- treat them as a plausible starting
-guess for what to look for, not a confirmed schema:**
+The real top-level shape (`root{'structures':.., 'vcalls':.., 'version':..,
+'filemd5':.., 'filename':..}`) is built by `oojson.pl`'s
+`makeAllStructuresJson`/`makeOneVcallUsageJson`. Two things that don't match
+a naive guess: **`structures` is an object keyed by class name, not an
+array** (`dict_create(Json, structures, KVPairs)` over `NameKey:ClsJson`
+pairs), and virtual calls live under **`vcalls`**, not `calls`, as an
+instruction-address-to-target mapping rather than a flat list of records.
+Each class entry is `classes{'name', 'demangled_name', 'size', 'members',
+'methods', 'vftables'}`.
 
 ```bash
-# List all recovered classes and their virtual function tables:
-jq -r '.structures[] | "\(.name): vftable=\(.vftables[0].ea) size=\(.size)"' recovered_classes.json
+# List all recovered classes with their size and vftables:
+jq -r '.structures | to_entries[] | "\(.value.name): size=\(.value.size) vftables=\(.value.vftables)"' recovered_classes.json
 
-# Find all resolved virtual call sites:
-jq -r '.calls[] | select(.virtual == true) | "\(.call_site): calls \(.target_name) (\(.target_ea))"' recovered_classes.json
+# Dump the virtual-call-site -> target mapping:
+jq '.vcalls' recovered_classes.json
+```
+
+### Querying the Prolog facts/results directly (per `ooprolog.pod`)
+
+There is no documented recipe for hand-loading `facts.pl`/`results.pl` into
+a bare `swipl` session -- don't invent one. The real, documented workflow is
+OOAnalyzer's own `--halt=false` flag, which drops you into an interactive
+SWI-Prolog shell with everything already loaded, right after the analysis
+phase completes:
+
+```bash
+ooanalyzer --halt=false <binary.exe>
+# ... analysis runs, then you're left at a `?-` prompt with all facts/rules loaded
+```
+
+From there, two confirmed real predicates worth querying directly (both
+verified against the actual `oorules/*.pl` source, not guessed):
+
+```prolog
+?- rTTICompleteObjectLocator(Pointer, Address, TDAddress, CHDAddress, Offset, CDOffset).
+% facts.pl -- Pointer is the vftable-4 slot; Address is the COL's own location;
+% TDAddress/CHDAddress are the TypeDescriptor/ClassHierarchyDescriptor addresses;
+% Offset/CDOffset match this skill's msvc-abi.md CompleteObjectLocator fields.
+
+?- finalClass(ClassID, VFTable, MinSize, MaxSize, RealDestructor, MethodList).
+% results.pl -- the actual resolved-class predicate; MinSize/MaxSize because
+% OOAnalyzer reasons in bounds, not always an exact size.
+
+?- finalVFTable(VFTable, CertainSize, LikelySize, RTTIAddress, RTTIName).
+% results.pl -- CertainSize vs LikelySize is the same bounded-reasoning idea
+% applied to a single vftable rather than the whole class.
+```
+
+Four more, confirmed real in `final.pl`/`forward.pl`/`rules.pl` (not in
+`facts.pl`/`results.pl` -- these are the raw reasoning-layer predicates the
+`final*` ones above are derived from, not the top-level answers):
+
+```prolog
+?- factConstructor(Method).
+% final.pl/forward.pl/rules.pl -- Method (an address) is confirmed as a constructor.
+
+?- factDerivedClass(DerivedClass, BaseClass, ObjectOffset).
+% final.pl/forward.pl/rules.pl -- "In the Derived class at the specified offset
+% is an object instance of the type specified by Base" (final.pl's own comment).
+% ObjectOffset is the base subobject's byte offset within the derived class.
+
+?- factClassSizeGTE(Class, KnownSize).
+?- factClassSizeLTE(Class, KnownSize).
+% rules.pl only -- Class's size is known to be at least/at most KnownSize.
+% OOAnalyzer reasons about size as a bounded range, not a single number, which
+% is why finalClass above has separate MinSize/MaxSize fields rather than one.
 ```
 
 ### IDA Pro / Ghidra Integration
