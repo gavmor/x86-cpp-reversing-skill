@@ -173,60 +173,14 @@ recovery will (correctly) find nothing. When you need to recover a *custom
 container/file format* the binary loads at runtime, the workflow is
 different from class recovery:
 
-1. **Find the load call site.** Grep strings/imports for the filename or
-   extension (`izzj` in r2, or `strings <binary> | grep -i <ext>`), then
-   `axt` (r2) or `nm`/xref-search the address to find what calls `open`/
-   `CreateFileA`/`fopen` with that string. If the format has its own magic
-   number/signature (many do), searching for *that* constant and
-   cross-referencing it can land you closer to the validator directly,
-   skipping the file-open call entirely -- Shashidhar & Novak (*Digital
-   Forensic Analysis on Prefetch Files*, 2015) used exactly this against
-   `ntkrnlpa.exe`, searching for prefetch files' own `"SCCA"` signature
-   string rather than tracing from a file-open API.
-2. **Watch for a thin wrapper hiding the real logic one call deeper.** MSVC
-   binaries commonly wrap the interesting function in an SEH prologue
-   (`mov eax, fs:[0]` / `push -1` / `push <exception handler addr>`) whose
-   body is mostly a switch/jump-table translating an internal error code
-   into user-facing strings (`"Can't open sound data file"`,
-   `"Sound data file is corrupt"`, etc.) — the actual `open`/`read`/format
-   validation happens in a callee this wrapper invokes once, near the top.
-   Disassembling only the outer function and concluding "there's no real
-   parsing logic here" is a common false negative; follow every `call` in a
-   short wrapper before giving up on it.
-3. **Read the validator like a spec, not just a function.** The real payoff
-   function typically does, in order: `open()`, a small fixed-size `read()`
-   for a magic/header, then comparisons against **hard-coded constants**
-   (`cmp eax, 0x44d`) rather than trusting whatever the file says. Those
-   constants ARE the format spec — a `cmp` against a literal right after a
-   `read()` tells you a field's expected value and size far more reliably
-   than inferring it from one sample file.
-4. **A validation loop over a table tells you the table's true shape.**
-   If you see a loop incrementing a pointer by a fixed stride and comparing
-   `entry vs previous_entry` (monotonicity) or `entry & mask` (alignment),
-   that loop's stride *is* the true per-entry size — which settles disputes
-   a data-only inspection can't. E.g. a loop advancing by 4 bytes per
-   iteration over what you assumed was an `{offset,size}` pair table (8
-   bytes/entry) proves the assumption wrong: it's a flat single-`u32`-per-entry
-   table, and the "size" you thought you saw was actually the next entry's
-   offset.
-
-   **A concrete check for "is this stride actually linear," not just
-   eyeballed:** Ketterlin & Clauss (2014, Fig. 3) give the criterion --
-   at a loop header, a register's per-iteration update is `φ(R_out, R_in)`
-   (the value coming from outside the loop vs. the value carried from the
-   previous iteration). If `R_in` expands to `R + α` where `α` doesn't
-   change during the loop, then the register's value at iteration `I` is
-   exactly `R_out + I*α` -- a real, checkable proof the stride is linear
-   across the whole loop, not just true for the one or two iterations you
-   happened to read.
-5. **Re-verify data-driven hypotheses against the loader, don't just trust
-   the last write-up.** If a bug was fixed based on an *empirical* pattern
-   in the data (e.g. "these values are monotonic, so it must be a flat
-   offset table") without re-disassembling the actual loader, treat that as
-   a hypothesis, not ground truth, until you've traced it back to the
-   validator itself — docs and commit messages claiming "confirmed against
-   the binary" can be aspirational and go stale the moment nobody re-checks
-   them against a later fix.
+| Step | Action | Checkpoint (what proves this step actually worked) |
+|---|---|---|
+| 1 | Find the load call site: grep strings/imports for the filename/extension (`izzj` in r2, or `strings <binary> \| grep -i <ext>`), then `axt`/`nm`/xref-search to find the `open`/`CreateFileA`/`fopen` caller. **If the format has its own magic number/signature, search for *that* constant instead** and cross-reference it -- often lands you closer to the validator directly. | A specific call site address, not just a string hit. |
+| 2 | Disassemble that call site's function. If it's mostly an SEH prologue (`mov eax, fs:[0]` / `push -1` / `push <handler>`) plus a switch translating error codes into strings (`"Can't open sound data file"`), **follow every `call` inside it** before concluding there's no real logic. | You've named the callee that does the actual `open`/`read`, not just the wrapper. |
+| 3 | Read the real validator's `open()` → `read()` → `cmp` sequence. Every `cmp eax, <literal>` right after a `read()` is a format-spec assertion, not a guess. | You can write down a field's expected value/size from a `cmp` instruction, not from a single sample file. |
+| 4 | If there's a loop walking a table, read the increment as the record stride, and confirm it's linear -- not just true for the entries you happened to read: at the loop header, `R = φ(R_out, R_in)`; if `R_in` expands to `R + α` with `α` loop-invariant (Ketterlin & Clauss, 2014, Fig. 3), then `R = R_out + I*α` holds for the *whole* loop. | You have a proof the stride is constant across all N entries, not an eyeballed sample of two or three. |
+| 5 | Before trusting any prior doc/commit message's claim about this format ("these values are monotonic, so..."), re-derive it from the validator yourself. | Your conclusion traces to a specific instruction address, not to someone else's write-up. |
+| **Exit** | You can state the format's field layout and stride with each claim backed by a specific instruction address. | Not "seems right" -- a `cmp`/increment instruction address per claim. |
 
 ```bash
 # generalized recipe used above (radare2):
@@ -235,6 +189,8 @@ r2 -q -c "aaa; s <callee_addr>; pdf" <binary>        # read the real validator
 # strip ANSI color codes when saving output for repeated grep/sed passes:
 r2 -q -c "aaa; s <addr>; pdf" <binary> | sed 's/\x1b\[[0-9;]*m//g' > /tmp/fn.txt
 ```
+
+*Anti-rationalization*: "The first few entries incremented by 4 bytes, so the stride is 4" is a sample, not step 4's proof -- confirm `α` is loop-invariant before trusting it past the entries you actually read. Shashidhar & Novak's magic-string entry point (searching for prefetch files' own `"SCCA"` signature in `ntkrnlpa.exe` rather than tracing a file-open API) is the concrete precedent for step 1's alternate route.
 
 ## 10. Resource-binding recovery: mapping a data-file's indexed entries to the code that uses them
 
@@ -250,54 +206,17 @@ own recipe.
 ### 10.1 Find the resource-access API
 
 The function that takes an index and does something with it is not always a
-clean, directly-called symbol:
+clean, directly-called symbol. Diagnose which case you're in from the
+symptom, don't guess:
 
-- **Thin wrapper.** Same pattern as section 9 -- an SEH/error-string wrapper
-  may sit between the call sites you can find and the real access logic one
-  call deeper. Follow every call in a short wrapper before treating it as
-  "the" API.
-- **Function-pointer slot indirection.** The real handler may be installed
-  into a global fn-ptr slot at init time (`mov [slot], offset <fn>`) rather
-  than called by name. If a symbol-based or `axt` xref sweep on the handler
-  itself comes up empty, that's the tell: find every write to the slot first
-  (`nm`/`objdump -s`/`r2 axt` on the slot address itself, not the function)
-  to enumerate every handler ever installed there, then find where the slot
-  is *read and called* (`call dword [<slot_addr>]`) -- that call instruction,
-  not any function symbol, is the real fan-in point to sweep.
-- **Inlined dispatch.** If the compiler inlined a small index-dispatch at
-  every use site, there is no single "the API" function to xref. Sweep from
-  the underlying data instead -- the table's base symbol or the offset
-  computation pattern (`lea <reg>, [<index_reg>*<stride> + <table_base>]`) --
-  rather than from a function that doesn't exist as a standalone symbol.
-- **Indirect-pointer xref evasion (deliberate or not).** An xref sweep can
-  come up empty even for a real, statically-computable target if the
-  reference isn't a direct pointer: `mov eax, offset dummy_anchor` followed
-  by `add eax, 0x100` reaches the real data, but a static xref tool
-  (including IDA, not just this skill's usual tools) shows a reference only
-  to `dummy_anchor`, never to the real target address (Yurichev, *Reverse
-  Engineering for Beginners*, ch. 50.2.5). If a resource table or string you
-  expect to be referenced has zero xrefs, check nearby code for an `add`/
-  `lea` applied to an unrelated anchor symbol before concluding the
-  reference doesn't exist in code at all.
-- **Bloated-instruction xref evasion.** A direct `call`/`jmp` to a symbol is
-  what static xref sweeps actually detect; substituting equivalent
-  instruction sequences defeats this specifically: `jmp label` as
-  `push label` / `ret`, or `call label` as `push return_addr` / `push
-  label` / `ret` -- same runtime effect, but "IDA will not show the
-  references to the label" (same source, ch. 50.2.2) because there's no
-  `call`/`jmp` opcode pointing at it to find. If you see a `push` of what
-  looks like a code address immediately followed by `ret`, treat it as a
-  disguised `call`/`jmp` and resolve the target manually rather than relying
-  on the xref sweep to have found it.
-- **Virtual-call indirection (vtable dispatch).** Harder than the fixed
-  fn-ptr-slot case above: a call like `call dword ptr [eax+14h]` dispatches
-  through a *per-instance* vtable pointer, not one fixed global address --
-  there's no single slot to sweep statically, since the target address is
-  computed fresh from whatever object `eax` happens to be at runtime. Static
-  disassemblers (including IDA, not just this skill's usual tools) generally
-  do **not** create a cross-reference for this kind of call at all. See
-  section 10.6's IDA/IDC vtable-xref script for a dynamic technique that
-  resolves every real caller of every slot in a given vtable automatically.
+| Symptom | Likely cause | What to do |
+|---|---|---|
+| A symbol exists, calls into it are visible, but there's little logic in the function body | Thin wrapper (same pattern as section 9) -- an SEH/error-string wrapper sits one call deeper | Follow every call inside it before treating this as "the" API |
+| A symbol-based or `axt` xref sweep on a suspected handler comes up **empty** | Function-pointer slot indirection -- the handler is installed at init time (`mov [slot], offset <fn>`), never called by name | Sweep the *slot address*, not the function: find every write (`nm`/`objdump -s`/`r2 axt` on the slot) to enumerate handlers, then find where the slot is *read and called* (`call dword [<slot_addr>]`) -- that instruction is the real fan-in point |
+| There is no standalone function to xref *at all* for what should be an access point | Inlined dispatch -- the compiler inlined a small index-dispatch at every use site | Sweep from the underlying data instead: the table's base symbol, or the `lea <reg>, [<index_reg>*<stride> + <table_base>]` computation pattern |
+| A resource table/string you're sure exists has **zero** xrefs | Indirect-pointer xref evasion -- `mov eax, offset dummy_anchor` / `add eax, 0x100` reaches the real target, but static tools (including IDA) only show a reference to `dummy_anchor` (Yurichev, ch. 50.2.5) | Check nearby code for an `add`/`lea` off an unrelated anchor symbol before concluding the reference doesn't exist |
+| A `push` of what looks like a code address is immediately followed by `ret`, with no `call`/`jmp` anywhere near the real target | Bloated-instruction xref evasion -- `jmp label` as `push label`/`ret`, or `call label` as `push return_addr`/`push label`/`ret` (Yurichev, ch. 50.2.2: "IDA will not show the references to the label") | Treat the `push`+`ret` pair as a disguised `call`/`jmp` and resolve the target by hand |
+| `call dword ptr [eax+14h]`-style dispatch, no xref found by any static tool | Virtual-call indirection -- the target is computed fresh per-instance from a vtable pointer, not one fixed global address | See section 10.6's IDA/IDC vtable-xref script, which resolves every real caller of every slot dynamically |
 
 ### 10.2 Enumerate call sites
 
@@ -326,6 +245,28 @@ while (xfAddr != BADADDR) {
 // code, dr_O/dr_W/dr_R/dr_T/dr_I for data) -- IOActive, Reverse Engineering
 // Code with IDA Pro, ch. 9, pp.222-224.
 ```
+
+The IDC snippet above assumes a human pasting it into IDA's interactive
+command window (`Shift+F2`) -- not something an agent can drive over a
+shell alone. If you have a licensed IDA Pro 9.1+ install with `idalib` and
+need this step to be genuinely CLI-drivable, `headless-ida`
+(`github.com/http8080/headless-ida`, confirmed via its own README + a
+targeted grep for "debugger"/"breakpoint"/"attach" -- none found, it is
+static-analysis-only) wraps the same xref database over HTTP/JSON-RPC:
+
+```bash
+ida-cli start <binary> --idb-dir <dir>   # analyzes once, caches the .i64
+ida-cli wait <id>
+ida-cli xrefs <api_addr> --direction to -i <id>   # direct analog of axt/RfirstB
+ida-cli stop <id>
+```
+
+This covers the *static* half of IDA usage in this section cleanly (it's
+the same underlying xref database `axt`/IDC read, just queried without a
+GUI). It does not extend to 10.6 below: `headless-ida` has no debugger or
+breakpoint capability at all, so the dynamic vtable-xref technique there
+still needs an interactive IDA session or one of the CLI-scriptable
+GDB/Pin/tracer alternatives documented in that section.
 
 ### 10.3 Recover the index argument at each call site
 
@@ -365,46 +306,31 @@ next one:
    case rather than silently misbehaving, but avoiding it with a venv is
    simpler than debugging it.
 
-   **`angr` is a legitimate alternative symbolic-execution engine** if
-   Triton's straight-line emulation model doesn't fit (e.g. you want
-   automatic path exploration across branches rather than the single
-   concrete path `backward_slice.py` follows). REMaQE (Udeshi et al.,
-   NYU Tandon) builds its equation-recovery pipeline on `angr` for exactly
-   this reason -- worth citing `angr` itself as the real, installable tool,
-   not REMaQE, which has no public code release. REMaQE also names a
-   concrete limitation worth carrying over to any symbolic-execution-based
-   technique in this skill: function pointers, recursion, and obfuscated
-   control flow (`references/obfuscation.md`) all "run into the path
-   explosion problem of symbolic execution" -- if a slice or trace hangs or
-   explodes in state count, check whether the code you're tracing through
-   has one of these, rather than assuming the tool is broken.
+   **If you already know upfront that you need automatic path exploration
+   across branches, not one concrete path** -- that's a tool-choice decision,
+   not a diagnosis, and it's made before you run anything: go straight to
+   `angr` (a real, installable symbolic-execution engine; REMaQE, Udeshi et
+   al., builds its equation-recovery pipeline on it -- cite `angr` itself,
+   REMaQE has no public release), skipping `backward_slice.py` entirely.
 
-   **UbSym (Baradaran, Heidari, Kamali et al., *Int. J. Information
-   Security*, 2023) is a concrete, real, publicly-released mitigation for
-   exactly this path-explosion problem** -- an actual `angr` plugin, not
-   just a technique description (`github.com/SoftwareSecurityLab/UbSym`,
-   confirmed real and matching the paper's own claims). Rather than
-   symbolically executing the whole program, it statically identifies a
-   "unit" (the function containing a candidate vulnerability, found via
-   concrete VEX-IR pattern rules -- e.g. a `malloc` followed by a `Store`
-   writing more bytes than were allocated, for heap overflow) and runs
-   symbolic execution scoped to just that unit. To keep the result
-   meaningful for the *whole program's* real inputs (not just the unit in
-   isolation), it Monte Carlo-samples the input space, applies a
-   "treatment learning" algorithm (TAR3) to narrow the covering input
-   range, then curve-fits a function mapping system-level input to
-   unit-level input, walking up the constraint tree when no smooth
-   relationship exists at the current node. Benchmarked against MACKE and
-   Driller on NIST SARD programs: 1.00 accuracy/precision/recall on all
-   four vulnerability classes (heap overflow, stack overflow, use-after-
-   free, double-free) versus MACKE's recall as low as 0.21 on use-after-
-   free and Driller unable to detect use-after-free at all ("Driller only
-   detects vulnerabilities making the program crash") -- and 3-15x faster.
-   **Named limitations, not just strengths**: no pruning yet for
-   extremely large units (may fail to build the unit tree at all), and
-   stack-overflow detection is unsound by construction -- it only catches
-   overflows that corrupt the saved frame pointer, not ones that corrupt
-   only local variables without reaching it.
+   **If instead you started with `backward_slice.py` and it hangs or its
+   state count explodes**, that *is* a genuine symptom -- diagnose the cause
+   before reaching for a bigger tool:
+
+   | Symptom | Diagnosis | Fix |
+   |---|---|---|
+   | Slice/trace hangs or state count explodes, and the code has a function pointer, recursion, or obfuscated control flow (`references/obfuscation.md`) | Path explosion -- named directly by REMaQE as the failure mode for exactly these three shapes | Confirm this is the actual cause (check the disassembly for the three shapes above) before escalating further |
+   | Path explosion confirmed, and it's specifically a memory-corruption vulnerability (heap/stack overflow, UAF, double-free) | Whole-program symbolic execution is exploring far more state than the bug needs | `UbSym` (`github.com/SoftwareSecurityLab/UbSym`, confirmed real, a working `angr` plugin) -- statically scopes symbolic execution to a "unit" (the function containing the candidate vulnerability, found via VEX-IR pattern rules per class) instead of the whole program |
+
+   UbSym's own benchmark against MACKE/Driller on NIST SARD programs: 1.00
+   accuracy/precision/recall on all four vulnerability classes (MACKE's
+   recall was as low as 0.21 on use-after-free; Driller couldn't detect
+   use-after-free at all -- "only detects vulnerabilities making the
+   program crash") and 3-15x faster. **Named limitations, not just
+   strengths**: no pruning yet for extremely large units (may fail to
+   build the unit tree at all), and stack-overflow detection is unsound by
+   construction -- it only catches overflows that corrupt the saved frame
+   pointer, not ones that corrupt only local variables without reaching it.
 3. **`this`-relative / thiscall argument.** Under MSVC thiscall (see
    `references/msvc-abi.md`), the index may come from the object itself:
    `mov eax, [ecx+<off>]` followed by `push eax` means the *field offset*
@@ -470,25 +396,15 @@ next one:
   target, VPS (Pawlowski et al., ACSAC 2019, §4.3.2) gives a three-stage
   procedure for tracing a virtual call's `vtblptr` back to the constructor
   that wrote it, without executing anything:
-  1. **Data-flow graph, backwards, from both ends.** Starting from *every*
-     vtable-referencing instruction (which creates a `vtblptr`) and *every*
-     virtual-call candidate (which uses one), track data flow backward
-     through the code -- interprocedurally, through argument/return
-     registers, using SSA form. A vtable-write and a call-site that share
-     the same ultimate data source are a candidate match.
-  2. **Verify with a real control-flow path**, not just a shared data
-     source. Shared ancestry alone doesn't prove the `vtblptr` created at
-     one site is actually the one consumed at the other -- translate the
-     data-flow connection into an actual CFG path between the two
-     instructions and confirm one exists.
-  3. **Confirm with symbolic execution.** Replace the `vtblptr` with a
-     symbolic value at the write site, symbolically execute along the
-     verified path (skipping into unrelated calls rather than exploring
-     them), and check the symbolic value is what's actually used at the
-     call site.
 
-  This is the static counterpart to the dynamic breakpoint script in
-  section 10.6 -- reach for the IDC script when you can run the target and
+  | Step | Action | Checkpoint |
+  |---|---|---|
+  | 1 | Backward data-flow graph from *every* vtable-referencing instruction (creates a `vtblptr`) AND *every* virtual-call candidate (uses one) -- interprocedurally, through argument/return registers, in SSA form | A write site and a call site share the same ultimate data source (candidate match, not yet proven) |
+  | 2 | Translate that shared-data-source claim into an actual CFG path between the two instructions | A real path exists -- shared ancestry alone is not proof |
+  | 3 | Symbolically execute along the verified path with the `vtblptr` marked symbolic at the write site (skip into unrelated calls rather than exploring them) | The symbolic value is what's actually consumed at the call site |
+  | **Exit** | Confirmed match, or a documented non-match | Not "probably the same object" |
+
+  Reach for the IDC script (section 10.6) when you can run the target and
   want an immediate, concrete answer; reach for this when you can't run it,
   or when you want to verify a match rather than just observe one.
 - **Stripped MSVC fallback (no RTTI).** When the enclosing function's own
@@ -601,13 +517,27 @@ disruptive, log the same tuple without stopping execution instead:
   the resource-access API in.
 
 **IDA/IDC vtable-xref script (resolves the 10.1 virtual-call-indirection
-case).** If you have IDA Pro, this fully automates recovering real callers
-for every slot in a vtable, without writing a plugin. Select the vtable's
-address range in the IDA view, run the script below (`File > IDC File...`,
-or paste into the IDC command window with `Shift+F2`), then hit `Alt-F9`
-and drive the target normally (play the game, exercise the feature) --
-every indirect call through any slot in that range gets converted into a
-real, permanent cross-reference:
+case) -- requires a human at an interactive IDA GUI, not agent/CLI-drivable.**
+Every step below (selecting a range in the IDA view, hitting a hotkey,
+"driving the target normally") assumes a person operating IDA and the
+target simultaneously; there's no shell equivalent of "play the game" for an
+agent to issue. `headless-ida` doesn't close this gap either -- it has no
+debugger or breakpoint capability (confirmed via its README and a grep for
+"debugger"/"breakpoint"/"attach": zero matches), so it can't install the
+conditional breakpoints this technique depends on. **In a pure-agent
+workflow, reach for the already-CLI-scriptable GDB logging-breakpoint, Pin,
+or `tracer.exe` techniques documented earlier in this section instead** --
+they get you the same real-caller-per-slot result without a human at the
+keyboard. Use the script below only when a human collaborator with IDA
+access is doing this part of the work:
+
+| Step | Action | Checkpoint |
+|---|---|---|
+| 1 | Select the vtable's address range in the IDA view | Selection spans a whole number of 4-byte slots |
+| 2 | Load the script below (`File > IDC File...`, or paste into the IDC command window with `Shift+F2`) | Script loads with no syntax errors |
+| 3 | Hit `Alt-F9` | Breakpoints installed on every slot's target, none of them stop execution |
+| 4 | Drive the target normally (play the game, exercise the feature) | Execution proceeds without pausing at any of the new breakpoints |
+| **Exit** | Every indirect call through any slot in the range is now a real, permanent cross-reference | Check `AddCodeXref`'s effect directly -- the source binary this was verified against went from 0 visible xrefs to 26 real call sites |
 
 ```c
 #include <idc.idc>
@@ -644,20 +574,15 @@ static main()
 }
 ```
 
-How it works: `setBPs` walks the selected range in 4-byte steps (one vtable
-slot per step), reading each slot's target function pointer with
-`Dword(currAddr)`, and installs a software breakpoint on each target that's
-conditional on `breakpointHandler()` -- returning `0` from a conditional
-breakpoint handler means "don't actually stop," so this never interrupts
-execution, it only runs code on every hit. `breakpointHandler` finds the
-real caller by searching backward from the return address on the stack
-(`PrevHead(Dword(ESP), Dword(ESP)-10)` -- an indirect call through a
-register is only 3 bytes, so searching back 10 bytes is enough to land on
-the actual `call` instruction) and calls `AddCodeXref` to record it as a
-permanent, user-added cross-reference. Verified against a real MSVC binary
-in the source: 26 real call sites recovered for a function that had zero
-visible xrefs beforehand. (IOActive, *Reverse Engineering Code with IDA
-Pro*, ch. 9, pp.213-220, "VTable xref Script," Figure 9.10.)
+Mechanism, if step 3 or 4 doesn't behave as expected: `setBPs` reads each
+slot's target with `Dword(currAddr)` and installs a breakpoint conditional
+on `breakpointHandler()` -- returning `0` from a conditional-breakpoint
+handler means "don't stop," so it only *runs code* on every hit, never
+interrupts. `breakpointHandler` finds the real caller by searching backward
+from the return address on the stack (`PrevHead(Dword(ESP), Dword(ESP)-10)`
+-- an indirect call through a register is only 3 bytes, so 10 bytes back is
+enough to land on the actual `call`). (IOActive, *Reverse Engineering Code
+with IDA Pro*, ch. 9, pp.213-220, "VTable xref Script," Figure 9.10.)
 
 **Differential technique:** trigger one in-game event repeatedly (open the
 same door, walk into the same water tile) and diff the captured index sets
