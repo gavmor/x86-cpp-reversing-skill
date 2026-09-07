@@ -224,6 +224,15 @@ clean, directly-called symbol:
   the underlying data instead -- the table's base symbol or the offset
   computation pattern (`lea <reg>, [<index_reg>*<stride> + <table_base>]`) --
   rather than from a function that doesn't exist as a standalone symbol.
+- **Virtual-call indirection (vtable dispatch).** Harder than the fixed
+  fn-ptr-slot case above: a call like `call dword ptr [eax+14h]` dispatches
+  through a *per-instance* vtable pointer, not one fixed global address --
+  there's no single slot to sweep statically, since the target address is
+  computed fresh from whatever object `eax` happens to be at runtime. Static
+  disassemblers (including IDA, not just this skill's usual tools) generally
+  do **not** create a cross-reference for this kind of call at all. See
+  section 10.6's IDA/IDC vtable-xref script for a dynamic technique that
+  resolves every real caller of every slot in a given vtable automatically.
 
 ### 10.2 Enumerate call sites
 
@@ -231,6 +240,26 @@ clean, directly-called symbol:
 r2 -q -c "aaa; axt @ <api_addr>" <binary>            # who calls/reads this address
 r2 -q -c "aaa; axt @ <slot_addr>" <binary>           # for the fn-ptr-slot case: who writes AND who reads the slot
 objdump -d -M intel <binary> | grep -B2 'call.*<api>' # binutils fallback: literal push before call
+```
+
+If IDA Pro is available, its built-in scripting language (IDC) has a direct
+analog to `axt` -- useful since IDA's xref database is often more complete
+against MSVC/PE binaries than r2's:
+
+```c
+// code xrefs TO an address (direct analog of `axt`):
+auto xfAddr, origAddr;
+origAddr = ScreenEA();
+xfAddr = RfirstB(origAddr);
+while (xfAddr != BADADDR) {
+    Message("%x to %x, type == %d\n", xfAddr, origAddr, XrefType());
+    xfAddr = RnextB(origAddr, xfAddr);
+}
+// Rfirst/Rnext (xrefs FROM an address), DfirstB/DnextB (data xrefs TO an
+// address) mirror the same first/next iteration pattern. XrefType() returns
+// the flowtype of the last xref returned (fl_CF/fl_CN/fl_JF/fl_JN/fl_F for
+// code, dr_O/dr_W/dr_R/dr_T/dr_I for data) -- IOActive, Reverse Engineering
+// Code with IDA Pro, ch. 9, pp.222-224.
 ```
 
 ### 10.3 Recover the index argument at each call site
@@ -308,6 +337,13 @@ next one:
     vtables you've already identified via `mov [ecx], offset <vtable>` in
     constructors (`references/msvc-abi.md` section on vftable identification)
     to name the type even without a demangled symbol.
+  - **Method-visibility heuristic**, once you have real callers for a set of
+    vtable slots (e.g. from section 10.6's IDC vtable-xref script): a target
+    function called from *outside* any vtable is public; one called only
+    from other methods within its own vtable is private; one called only
+    from methods in *other* vtables is protected. Doesn't replace RTTI, but
+    is a concrete, low-cost signal for classifying a resolved call site's
+    role when RTTI isn't available (IOActive, ch. 9, p.220).
 
 ### 10.5 Present the result
 
@@ -367,6 +403,65 @@ disruptive, log the same tuple without stopping execution instead:
   than assuming a modding library that looks applicable actually targets
   your bitness.
 
+**IDA/IDC vtable-xref script (resolves the 10.1 virtual-call-indirection
+case).** If you have IDA Pro, this fully automates recovering real callers
+for every slot in a vtable, without writing a plugin. Select the vtable's
+address range in the IDA view, run the script below (`File > IDC File...`,
+or paste into the IDC command window with `Shift+F2`), then hit `Alt-F9`
+and drive the target normally (play the game, exercise the feature) --
+every indirect call through any slot in that range gets converted into a
+real, permanent cross-reference:
+
+```c
+#include <idc.idc>
+static breakpointHandler()
+{
+    auto caller;
+    caller = PrevHead(Dword(ESP), (Dword(ESP) - 10));
+    AddCodeXref(caller, EIP, XREF_USER | fl_CN);
+    return 0; // don't stop on breakpoint
+}
+static setBPs()
+{
+    auto currAddr;
+    auto vStart;
+    auto vEnd;
+    auto virFunc;
+    vStart = SelStart();
+    vEnd = SelEnd();
+    if ((vStart == BADADDR) || (vEnd == BADADDR)) { return; }
+    if ((vStart - vEnd) % 4 != 0) { return; } // not DWORD aligned
+    for (currAddr = vStart; currAddr < vEnd; currAddr = currAddr + 4)
+    {
+        virFunc = Dword(currAddr);
+        if (GetBptAttr(virFunc, BPTATTR_EA) == -1) // no bpt there yet
+        {
+            if (!AddBptEx(virFunc, 0, BPT_SOFT)) { return; }
+            if (!SetBptCnd(virFunc, "breakpointHandler()")) { return; }
+        }
+    }
+}
+static main()
+{
+    AddHotkey("Alt-f9", "setBPs");
+}
+```
+
+How it works: `setBPs` walks the selected range in 4-byte steps (one vtable
+slot per step), reading each slot's target function pointer with
+`Dword(currAddr)`, and installs a software breakpoint on each target that's
+conditional on `breakpointHandler()` -- returning `0` from a conditional
+breakpoint handler means "don't actually stop," so this never interrupts
+execution, it only runs code on every hit. `breakpointHandler` finds the
+real caller by searching backward from the return address on the stack
+(`PrevHead(Dword(ESP), Dword(ESP)-10)` -- an indirect call through a
+register is only 3 bytes, so searching back 10 bytes is enough to land on
+the actual `call` instruction) and calls `AddCodeXref` to record it as a
+permanent, user-added cross-reference. Verified against a real MSVC binary
+in the source: 26 real call sites recovered for a function that had zero
+visible xrefs beforehand. (IOActive, *Reverse Engineering Code with IDA
+Pro*, ch. 9, pp.213-220, "VTable xref Script," Figure 9.10.)
+
 **Differential technique:** trigger one in-game event repeatedly (open the
 same door, walk into the same water tile) and diff the captured index sets
 across runs -- the index specific to that event is the one that shows up
@@ -384,3 +479,64 @@ not from where a prior doc said the call originates) before building
 attribution on top of it; a doc written before a later fix can describe a
 call path, table layout, or field offset that was true once and silently
 went stale.
+
+## 11. WinDbg: dynamic analysis for native Windows PE binaries
+
+Sections 7 and 10.6 use GDB throughout, but GDB only applies if the PE
+target is running under something GDB can actually attach to (Wine, or a
+Linux PE loader). A real Windows process needs a native Windows debugger --
+WinDbg, CDB, NTSD, and KD all share the same underlying engine (DbgEng) and
+the same command syntax, so the recipes below apply regardless of which
+front end you're using. ("Debugging Tools for Windows" is the package name;
+these are not part of Visual Studio.)
+
+**Static PE inspection without running it.** `cdb -z c:\path\to\file.exe`
+maps a PE/DLL into the debugger the same way a crash dump would -- useful
+for offline triage without ever executing the target, the WinDbg analog of
+just loading a binary into r2/objdump without running it.
+
+**Logging breakpoint without stopping (the WinDbg analog of GDB's
+`commands`/`continue` pattern used in section 10.6):**
+
+```
+bp kernel32!CreateFileW "!process @$proc 0;.printf \"%mu\n\",poi(@esp+4);gc;"
+```
+
+`.printf` logs, and `gc` ("go from conditional breakpoint") resumes
+execution automatically -- this is the same non-stopping logging-breakpoint
+technique section 10.6 describes for capturing `(index, retaddr, this)`
+tuples while playing a game normally, just with WinDbg's syntax instead of
+GDB's.
+
+**Conditional breakpoint on the return address** (directly useful for
+section 10's call-site attribution -- break only when a specific caller
+hits a shared function): `$ra` is a real pseudo-register holding the
+current return address.
+
+```
+bp user32!MessageBoxA "j (@$ra=0x401058) '';'gc;'"
+```
+
+**Conditional breakpoint on a register value**, the general form section
+10's fn-ptr-slot/table-sourced-index cases need (break only when a specific
+index/argument value is seen):
+
+```
+bp 7661d0df ".if @eax!=5 { gc; }"
+```
+
+**Hardware watchpoint** (direct analog of GDB's `watch`, for catching a
+vptr or field write -- msvc-abi.md's dynamic-confirmation step 4):
+the `ba` command takes an address, access type (`r`/`w`/`e`), and size.
+
+**Struct/type inspection once symbols are available:**
+`dt _UNICODE_STRING 0x18fef4` -- dumps a typed struct at an address; useful
+once you have a PDB, less useful against the stripped/no-PDB binaries this
+skill mostly targets.
+
+**Scripted automation beyond WinDbg's own command language.** DbgEng is a
+COM object with a real SDK if you need something more structured than
+typed WinDbg commands -- `IDebugControl4` (process control),
+`IDebugDataSpaces4` (`ReadVirtual`/`WritePhysical`), `IDebugRegisters2`,
+`IDebugSymbols3`, `IDebugClient5` -- the WinDbg equivalent of driving GDB
+from a Python script via `pwntools`' `gdb.debug()` (section 7).

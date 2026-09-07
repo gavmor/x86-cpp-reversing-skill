@@ -123,7 +123,12 @@ it's a second vftable.
 3. Use `mov [ecx], offset <addr>` in constructors (the direct MSVC analog of
    the Itanium vptr-store pattern) to identify which vftable belongs to
    which constructor, and thus which class.
-4. Confirm with GDB dynamically if static confidence is low: break at the
+4. Confirm dynamically if static confidence is low: break at the
    constructor, watch the store to `[ecx]`, and dump the resulting vftable's
-   slots the same way described in `itanium-abi.md`'s dynamic section --
-   the technique transfers directly, only the offsets differ.
+   slots the same way described in `itanium-abi.md`'s dynamic section -- the
+   technique transfers directly, only the offsets differ. **GDB only applies
+   if this PE binary is actually running under something GDB can attach to
+   (Wine, or a Linux PE loader).** A real Windows target needs a native
+   Windows debugger instead -- see `references/tool-recipes.md` section 11
+   for the WinDbg/DbgEng equivalent of this exact technique (conditional
+   logging breakpoints, hardware watchpoints on a vptr write).
