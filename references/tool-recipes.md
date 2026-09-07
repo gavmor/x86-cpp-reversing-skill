@@ -245,18 +245,31 @@ next one:
    to whatever instruction last wrote that register (`pdf` in r2, or read the
    `objdump` listing by hand) until it bottoms out at either a literal or a
    memory load. When the slice spans a loop or several basic blocks and doing
-   this by hand gets error-prone, Triton (Andriesse, *Practical Binary
-   Analysis*, ch. 13.3) automates exactly this: it symbolically emulates from
-   a chosen entry point and, at the target address, calls
-   `api.sliceExpressions()` on the symbolic expression for the register in
-   question to get back the list of contributing instructions. Triton
-   supports 32-bit x86 directly (`triton::arch::ARCH_X86`, instruction
-   pointer `ID_REG_EIP`) -- confirmed in the book's own architecture-setup
-   code, not just x64 -- so it applies to this skill's binaries as-is. The
-   book's example loads the binary through its own libbfd-based loader, but
-   Triton's `Instruction::setOpcode`/`setAddress` only need raw bytes and an
-   address, so any other source (LIEF, r2's `pxj`) works as the byte feed if
-   you'd rather not adopt that loader.
+   this by hand gets error-prone, use `scripts/backward_slice.py` (wraps
+   `triton-library`, the same technique as Andriesse's *Practical Binary
+   Analysis* ch. 13.3) instead of slicing by hand:
+
+   ```bash
+   python3 -m venv <skill_dir>/.venv                      # one-time setup
+   <skill_dir>/.venv/bin/pip install triton-library lief   # MUST be an isolated venv --
+                                                            # see the script's docstring
+   <skill_dir>/.venv/bin/python3 <skill_dir>/scripts/backward_slice.py \
+       <binary> <entry_addr> <slice_addr> <reg>
+   ```
+
+   Confirmed working end-to-end against a real 32-bit ELF (Triton emulates
+   real instruction semantics -- `ARCH.X86`/32-bit is directly supported, not
+   just x86-64 -- and genuinely follows calls/jumps/rets via the concrete
+   `eip` it maintains, not a naive linear disassembly walk). Emits the
+   contributing instructions as JSON, ordered by address. Requires a
+   **dedicated venv**: this machine (and possibly others) already has
+   OpenAI's unrelated GPU-kernel-compiler package also importable as
+   `triton` (a common transitive PyTorch dependency) -- installing
+   `triton-library` into the ambient interpreter can leave `import triton`
+   resolving to the wrong package entirely, failing with a confusing error
+   unrelated to anything in this recipe. The script detects and reports this
+   case rather than silently misbehaving, but avoiding it with a venv is
+   simpler than debugging it.
 3. **`this`-relative / thiscall argument.** Under MSVC thiscall (see
    `references/msvc-abi.md`), the index may come from the object itself:
    `mov eax, [ecx+<off>]` followed by `push eax` means the *field offset*
