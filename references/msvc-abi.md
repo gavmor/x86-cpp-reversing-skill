@@ -1,5 +1,8 @@
 # MSVC C++ ABI Reference (32-bit x86, PE format)
 
+*Objective: Performance, Robustness · Target: Assembly Code* (see
+`AGENTS.md`'s design-rationale section for what these mean here.)
+
 Targeting 32-bit x86 Windows binaries compiled by Microsoft Visual C++.
 Ground truth synthesized from:
 - Paul Sabanal and Mark Yason, *"Reversing C++"* (Black Hat DC 2007)

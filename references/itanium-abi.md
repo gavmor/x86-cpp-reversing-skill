@@ -1,5 +1,9 @@
 # Itanium C++ ABI on 32-bit x86 (GCC/Clang, Linux/BSD/etc, `_Z`-mangled)
 
+*Objective: Performance, Robustness · Target: Assembly Code* (Hu et al.,
+*SoK: Potentials and Challenges of LLMs for Reverse Engineering*, taxonomy
+-- see `AGENTS.md`'s design-rationale section for what these mean here.)
+
 This is the ABI you're dealing with any time symbols demangle with `c++filt`
 and start with `_Z` (e.g. `_ZN3Dog5speakEv`). `scripts/recon.py` automates
 most of what's below -- read this when you need to sanity-check its output,

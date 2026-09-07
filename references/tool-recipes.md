@@ -1,5 +1,11 @@
 # Tool recipes
 
+*Objective: Performance (primary), Robustness · Target: spans the full
+continuum, Raw Bytes (section 9, 13) through Assembly Code (most sections)
+to Decompiled Code (section 14) · Method: mostly tool-invocation/Agent-Based,
+section 12 (OOAnalyzer) most explicitly so* -- see `AGENTS.md`'s
+design-rationale section for what these tags mean.
+
 Concrete commands, grouped by what you're trying to answer. The guiding
 principle: prefer structured output (JSON, or `scripts/recon.py`'s already-
 demangled/already-classified output) over raw text dumps -- raw `objdump -d`

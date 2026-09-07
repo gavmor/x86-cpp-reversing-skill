@@ -1,5 +1,8 @@
 # Recognizing anti-debugging / anti-reversing techniques
 
+*Objective: Robustness · Target: Assembly Code* (see `AGENTS.md`'s
+design-rationale section for what these mean here.)
+
 Distinct from `references/obfuscation.md`: obfuscation hides what code
 *means*; anti-debugging detects *that you're analyzing it at all* and
 changes behavior in response (crash, silently misbehave, or just refuse to

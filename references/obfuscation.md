@@ -1,5 +1,8 @@
 # Recognizing obfuscation
 
+*Objective: Robustness · Target: Assembly Code* (see `AGENTS.md`'s
+design-rationale section for what these mean here.)
+
 Not every hard-to-read binary is stripped or optimized -- some are
 deliberately obfuscated. This file covers *recognizing* the common patterns
 (so you don't waste time treating deliberately-hostile code as if it were

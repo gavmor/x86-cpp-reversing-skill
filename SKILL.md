@@ -63,7 +63,14 @@ Reverse-engineers 32-bit little-endian x86 (IA-32) binaries compiled from C++. F
 [Verified Model] ◄── Phase 6: Verify ◄── Phase 5: Functions ◄── Phase 4: Class Model
 ```
 
-### Phase 1: Triage & Format Gate
+Phase-by-phase, this workflow climbs the SoK taxonomy's Target continuum
+(`AGENTS.md`'s design-rationale section) one step at a time -- Raw Bytes
+through Phase 2, Assembly Code through Phases 3-6, Decompiled Code only at
+the very end, in the Annotated Artifact deliverable. Each phase's Target is
+noted below; don't skip a rung (e.g. reasoning about class structure before
+confirming bitness) just because a shortcut looks available.
+
+### Phase 1: Triage & Format Gate (Target: Raw Bytes)
 **Gate:** Confirm 32-bit (`ELFCLASS32` or `PE32`) and little-endian (`e_data: 2's complement, little endian`).
 - Run `file <binary>` and `readelf -h <binary>`.
 - If 64-bit or big-endian, **STOP** — the 4-byte pointer arithmetic throughout this skill will produce invalid offsets.
@@ -73,11 +80,11 @@ Reverse-engineers 32-bit little-endian x86 (IA-32) binaries compiled from C++. F
   - *Obfuscated instructions / desynced disasm?* $\rightarrow$ `references/obfuscation.md`.
   - *Debugger detects attachment / crashes?* $\rightarrow$ `references/anti-debugging.md`.
 
-### Phase 2: ABI Disambiguation
+### Phase 2: ABI Disambiguation (Target: Raw Bytes -> Assembly Code)
 - **Itanium C++ ABI (`_Z`-prefixed symbols):** GCC / Clang (typically ELF). `this` passed on stack; vtable header contains offset-to-top and direct RTTI pointer. Pivot to `references/itanium-abi.md`.
 - **MSVC ABI (`?`-prefixed symbols or `.?AV` strings):** Visual C++ (typically PE). `__thiscall` convention (`this` in ECX); vtable slot 0 has COL pointer at offset `-4`. Pivot to `references/msvc-abi.md`.
 
-### Phase 3: Structural Reconnaissance
+### Phase 3: Structural Reconnaissance (Target: Assembly Code)
 - **ELF/Itanium Binaries:**
   ```bash
   python3 scripts/recon.py <binary>
@@ -88,19 +95,19 @@ Reverse-engineers 32-bit little-endian x86 (IA-32) binaries compiled from C++. F
   - Manual/Scripted: Scan `.rdata` for `.?AV` strings $\rightarrow$ trace COL pointers $\rightarrow$ find slot 0 at `col_ptr + 4` (`references/msvc-abi.md`).
 - **Fallback (binutils only):** `nm -C`, `objdump -s -j .data.rel.ro`, and `references/tool-recipes.md` §3–4.
 
-### Phase 4: Class Model Reconstruction
+### Phase 4: Class Model Reconstruction (Target: Assembly Code)
 - Correlate vtables to class names via RTTI descriptors.
 - Map base-class inheritance graphs:
   - *Itanium:* Walk `__si_class_type_info` and `__vmi_class_type_info` base arrays.
   - *MSVC:* Traverse `ClassHierarchyDescriptor` $\rightarrow$ `BaseClassArray` $\rightarrow$ `BaseClassDescriptor` (evaluate `_PMD` member displacements).
 - Verify primary vftables using the self-referencing circular invariant (`rTTISelfRef`).
 
-### Phase 5: Targeted Function Analysis
+### Phase 5: Targeted Function Analysis (Target: Assembly Code)
 - Disassemble constructors: confirm which vtable belongs to which class via `mov [reg], offset vtable` and note base ctor ordering.
 - Trace virtual call sites: find `call [reg + slot*4]` and match against the resolved vtable slot addresses.
 - Analyze struct fields: use memory displacements (`[esi + disp]`) and loop strides to map struct members (`references/tool-recipes.md` §13).
 
-### Phase 6: Dynamic Verification & Slicing (When Stalled)
+### Phase 6: Dynamic Verification & Slicing (When Stalled, Target: Assembly Code)
 - GDB dynamic tracing for ELF/Linux (`references/tool-recipes.md` §7).
 - WinDbg dynamic tracing for native PE/Windows (`references/tool-recipes.md` §11).
 - Automated register backward slicing via Triton (`scripts/backward_slice.py` / §10.3).
@@ -120,7 +127,7 @@ Before declaring the reverse engineering task complete, verify that you have pro
    - Every claimed vtable or struct field assignment is supported by exact instruction snippets (e.g. `0x00401234: mov dword ptr [esi], 0x00408040`).
 4. **Dual Output Deliverables:**
    - **Markdown Report:** Synthesized architecture, class hierarchy, and behavior explanation.
-   - **Annotated Artifact:** Pseudocode or assembly listing saved alongside the report with inline comments tying machine instructions back to the recovered model. Before calling it done, check it against each of the following -- a "yes" on any is a specific, fixable readability defect, not a stylistic nitpick (Archibald & Thijssen, *LLM Agent-Assisted Reverse Engineering with Quantitative Readability Metrics*, 2026):
+   - **Annotated Artifact (Target: Decompiled Code):** Pseudocode or assembly listing saved alongside the report with inline comments tying machine instructions back to the recovered model. This is the one deliverable that leaves Assembly Code for the top of the Target continuum -- the interpretability payoff the rest of the workflow's Assembly-level rigor was for. Before calling it done, check it against each of the following -- a "yes" on any is a specific, fixable readability defect, not a stylistic nitpick (Archibald & Thijssen, *LLM Agent-Assisted Reverse Engineering with Quantitative Readability Metrics*, 2026):
      - Does it still carry decompiler-artifact names (`var_48`, `param_2`, `iVar1`) anywhere a real name is derivable from the recovered class/field model?
      - Does it use a raw hex/magic-number literal where a named constant or enum value from the recovered model would read clearer?
      - Does it use manual pointer arithmetic (`*(p + 4)`) where array/field indexing (`p[1]`, `p->field`) says the same thing more clearly?
