@@ -49,6 +49,16 @@ recovery -- a distinct technique (xref-sweep outward from the
 resource-access API, not from a vtable or a container-open call). Pivot to
 `references/tool-recipes.md` section 10.
 
+**1d. Disassembly looks nonsensical, or a function seems to fix up the stack
+right after its own entry point with no matching call?** Before assuming a
+disassembler bug or an unusual compiler, check whether the binary is
+deliberately obfuscated -- see `references/obfuscation.md` for named,
+recognizable patterns (a `call` that never returns to its next instruction,
+opaque predicates, junk code built to desync a linear disassembler,
+clusters of instructions compilers rarely emit). Recognizing the pattern is
+usually enough to stop wasting time trying to make normal sense of code
+that was never meant to make sense when read linearly.
+
 **2. Tell ELF/Itanium apart from PE/MSVC -- the ABI is genuinely different.**
 Symbols starting with `_Z` (demangle with `c++filt`) mean Itanium ABI,
 almost always an ELF binary from GCC/Clang. Symbols starting with `?` mean
@@ -135,6 +145,7 @@ address, a symbol name, a relocation) rather than stated as bare assertions
 |---|---|
 | `references/itanium-abi.md` | Working with `_Z`-mangled (GCC/Clang, usually ELF) binaries -- vtable layout, RTTI structure decoding, multiple inheritance thunks, the abstract-class null-slot gotcha, cross-DSO relocation handling. |
 | `references/msvc-abi.md` | Working with `?`-mangled (MSVC, PE) binaries -- thiscall convention, vftable/Complete-Object-Locator layout, manual recovery recipe (no automated script backs this ABI). |
-| `references/tool-recipes.md` | You need the exact command for a specific job -- triage, symbol dumping, per-function disassembly, radare2/r2pipe JSON queries, GDB dynamic-analysis recipes, compiling your own reference binary for comparison, reversing a custom file-format loader (section 9), or mapping a data file's indexed entries to the code that uses them (section 10). |
+| `references/tool-recipes.md` | You need the exact command for a specific job -- triage, symbol dumping, per-function disassembly, radare2/r2pipe JSON queries, GDB dynamic-analysis recipes, compiling your own reference binary for comparison, reversing a custom file-format loader (section 9), mapping a data file's indexed entries to the code that uses them (section 10), or WinDbg/DbgEng dynamic analysis for a native Windows PE binary GDB can't attach to (section 11). |
+| `references/obfuscation.md` | Disassembly looks deliberately nonsensical (junk code, calls that never return, stack fixups with no matching call) -- recognizing common obfuscation patterns rather than mistaking them for disassembler or compiler bugs. |
 | `scripts/recon.py` | Run directly (not just read) against ELF binaries for automated binfo + demangled symbols + full vtable/RTTI recovery. `python3 scripts/recon.py <binary>` with no args prints usage. |
 | `scripts/backward_slice.py` | Run directly against a 32-bit ELF or PE binary to automate backward-slicing a register at a given address (tool-recipes.md section 10.3) instead of tracing it by hand. Requires a dedicated venv (`pip install triton-library lief`) -- see the script's docstring for why. |
