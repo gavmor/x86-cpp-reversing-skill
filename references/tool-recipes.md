@@ -713,6 +713,12 @@ the same command syntax, so the recipes below apply regardless of which
 front end you're using. ("Debugging Tools for Windows" is the package name;
 these are not part of Visual Studio.)
 
+If the target detects and evades WinDbg/CDB specifically (via one of the
+techniques in `references/anti-debugging.md`), see that file's "Debugging
+past these techniques instead of just recognizing them" section for
+HyperDbg -- a hypervisor-assisted debugger built to avoid triggering those
+checks in the first place, confirmed applicable to 32-bit PE targets.
+
 **Static PE inspection without running it.** `cdb -z c:\path\to\file.exe`
 maps a PE/DLL into the debugger the same way a crash dump would -- useful
 for offline triage without ever executing the target, the WinDbg analog of

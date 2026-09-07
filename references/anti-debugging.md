@@ -64,6 +64,46 @@ function's own code bytes and comparing against an expected value --
 catches both a software breakpoint (`0xCC` byte patched into the code) and
 any other in-memory patch, not just a debugger's presence.
 
+## Debugging past these techniques instead of just recognizing them
+
+Everything above is about *recognizing* a check. When the target actually
+uses one of these against you -- section 7/11's GDB/WinDbg recipes will
+trip it -- **HyperDbg** (Karvandi et al., arXiv:2207.05676, 2022) is a
+real, open-source hypervisor-assisted debugger built specifically to avoid
+triggering the checks this file documents, not just to recognize them:
+
+- **No `0xCC` breakpoint patches, no debug registers.** HyperDbg sets
+  breakpoints via EPT (Extended Page Table) hooks at the hypervisor level
+  instead of patching code or touching DR0-7 -- so the code-checksumming
+  and DR-based checks above have nothing to detect. It also emulates
+  unlimited "hardware watchpoints" via EPT read/write trapping, without
+  the real 4-register limit.
+- **RDTSC/RDTSCP timing-detection is specifically countered**, not just
+  ignored: HyperDbg intercepts these instructions on VM-exit and emulates
+  a plausible non-virtualized timing value (calibrated via `!measure`/
+  `!measure default` before enabling stealth) rather than returning the
+  real, debugger-slowed timestamp counter.
+- **Confirmed on 32-bit PE targets, not just 64-bit malware.** HyperDbg's
+  own evaluation (Table 2) includes six 32-bit packers/protectors --
+  MEW11, PEcompact, PELock, Petite, TeLock, YodaCrypter -- successfully
+  attached and debugged where other tested debuggers were detected or
+  errored.
+- **Enable stealth mode with `!hide`** once attached; `t` (step-in), `p`
+  (step-over), and `i` (an MTF-based instrumentation step guaranteeing
+  exactly one instruction executes, even under interrupt storms) are the
+  real single-step primitives. `!dr` lets you inspect/disable breakpoints
+  the target itself set, useful against the trap-flag/DR-based detection
+  above.
+- **Named limitation, not a claim of invisibility**: HyperDbg's own paper
+  states plainly it doesn't claim full invisibility, and can still be
+  detected in already-virtualized environments or via PatchGuard/Driver
+  Signature Enforcement absence-checks (mitigated with nested
+  virtualization and a valid driver signature, but not eliminated).
+
+Reach for this when a target's anti-debug checks are specifically what's
+blocking sections 7/11's more conventional debuggers, not as a default
+first choice.
+
 ## Disassembler-algorithm-specific evasion
 
 Different tools use different disassembly *algorithms*, and code can be
