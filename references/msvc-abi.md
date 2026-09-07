@@ -216,43 +216,57 @@ When symbols are stripped from a PE binary, follow this automated scanning algor
 
 ## Worked Manual Disassembly Example
 
-From Yurichev (*Reverse Engineering for Beginners*, ch. 51.1.1), MSVC 2008 `/FAs` listing
-for single-inheritance (`class box : public object`):
+Reproduced verbatim (not reconstructed) from Yurichev, *Reverse Engineering
+for Beginners*, ch. 51.1.1 -- MSVC 2008 `/FAs` listing for a single-method,
+single-inheritance class (`class box : public object`, one method, `dump()`):
 
 ```asm
-; BaseClassDescriptor for box
-??_R1A@?0A@EA@box@@8:
-    DD FLAT:??_R0?AVbox@@@8      ; pTypeDescriptor -> ".?AVbox@@"
-    DD 01H                       ; numContainedBases = 1
-    DD 00H                       ; where.mdisp = 0
-    DD 0ffffffffH                ; where.pdisp = -1 (not virtual)
-    DD 00H                       ; where.vdisp = 0
-    DD 040H                      ; attributes = 0x40 (pClassDescriptor present)
-    DD FLAT:??_R3box@@8          ; pClassDescriptor -> ClassHierarchyDescriptor
+??_R0?AVbox@@@8 DD FLAT:??_7type_info@@6B@ ; box `RTTI Type Descriptor'
+    DD  00H
+    DB  '.?AVbox@@', 00H
 
-; BaseClassArray for box (self, then base)
-??_R2box@@8:
-    DD FLAT:??_R1A@?0A@EA@box@@8    ; -> box BaseClassDescriptor
-    DD FLAT:??_R1A@?0A@EA@object@@8 ; -> object BaseClassDescriptor
+??_R1A@?0A@EA@box@@8 DD FLAT:??_R0?AVbox@@@8 ; BaseClassDescriptor at (0,-1,0,64)
+    DD  01H        ; numContainedBases = 1
+    DD  00H        ; mdisp = 0
+    DD  0ffffffffH ; pdisp = -1 (not a virtual base)
+    DD  00H        ; vdisp = 0
+    DD  040H       ; attributes = 0x40 (pClassDescriptor present)
+    DD  FLAT:??_R3box@@8  ; -> ClassHierarchyDescriptor
 
-; ClassHierarchyDescriptor for box
-??_R3box@@8:
-    DD 00H                       ; signature = 0
-    DD 00H                       ; attributes = 0 (single inheritance)
-    DD 02H                       ; numBaseClasses = 2 (box + object)
-    DD FLAT:??_R2box@@8          ; pBaseClassArray
+??_R2box@@8 DD FLAT:??_R1A@?0A@EA@box@@8 ; BaseClassArray: box, then...
+    DD  FLAT:??_R1A@?0A@EA@object@@8     ; ...its base, object
 
-; CompleteObjectLocator for box
-??_R4box@@6B@:
-    DD 00H                       ; signature = 0
-    DD 00H                       ; offset = 0
-    DD 00H                       ; cdOffset = 0
-    DD FLAT:??_R0?AVbox@@@8      ; pTypeDescriptor -> ".?AVbox@@"
-    DD FLAT:??_R3box@@8          ; pClassDescriptor
+??_R3box@@8 DD 00H  ; ClassHierarchyDescriptor: attributes = 0
+    DD  02H         ; numBaseClasses = 2 (box + object)
+    DD  FLAT:??_R2box@@8  ; -> BaseClassArray
 
-; Vftable for box
-??_7box@@6B@:
-    ; (at ??_7box@@6B@ - 4 sits FLAT:??_R4box@@6B@)
-    DD FLAT:?area@box@@UAENXZ    ; slot 0: virtual double box::area(void)
-    DD FLAT:?volume@box@@UAENXZ  ; slot 1: virtual double box::volume(void)
+??_R4box@@6B@ DD 00H  ; CompleteObjectLocator: signature = 0
+    DD  00H            ; offset = 0
+    DD  FLAT:??_R0?AVbox@@@8  ; pTypeDescriptor
+    DD  FLAT:??_R3box@@8      ; pClassDescriptor
+
+??_7box@@6B@ DD FLAT:??_R4box@@6B@ ; vftable
+    DD FLAT:?dump@box@@UAEXXZ
 ```
+
+**This transcription doesn't match the ABI as documented above, in two
+specific ways -- worth knowing about rather than silently correcting:**
+
+1. The `CompleteObjectLocator` here has only **4** `DD` fields (signature,
+   offset, pTypeDescriptor, pClassDescriptor) -- the `cdOffset` field this
+   file documents (and that `pelite`, retdec, and Lukasz Lipski's "RTTI
+   Internals in MSVC" all independently confirm) is missing. Most likely a
+   dropped line in the book's own transcription, not a real 4-field ABI
+   variant.
+2. The `??_7box@@6B@` (vftable) label is attached to the line holding the
+   COL pointer, with `dump()`'s pointer on the *next* line -- i.e., as
+   written, the vftable symbol's address is the COL pointer's address, one
+   DWORD *before* where this file's "vptr points directly at slot 0" claim
+   says it should be. The other three sources above agree with this file,
+   not with this specific transcription; treat this as a labeling artifact
+   in one book's manually-reformatted listing, not a reason to doubt the
+   vptr-at-slot-0 rule.
+
+Cross-checking against more than one source is what caught both of these --
+neither is obvious from the transcription alone, and taking it at face
+value would have propagated two wrong facts into this reference.

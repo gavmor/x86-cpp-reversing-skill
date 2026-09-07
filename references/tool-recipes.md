@@ -624,7 +624,15 @@ ooanalyzer --json=out.json --prolog-facts=facts.pl --prolog-results=results.pl <
 
 ### Inspecting Results (`jq`)
 
-The resulting JSON output maps directly to the class model:
+**The field names below are unverified -- `ooanalyzer.pod` documents that
+the JSON output describes class member layout, method/class assignment,
+inheritance, and constructors/destructors, but does not publish a field-
+level schema, and no schema was confirmed against this skill's own primary-
+source-verification norm (`AGENTS.md`). Run `ooanalyzer --json=out.json
+<binary.exe>` and inspect the actual output structure yourself (`jq '.'
+out.json | head -100`, or `jq 'keys'` on a few nested objects) before
+trusting the specific paths below -- treat them as a plausible starting
+guess for what to look for, not a confirmed schema:**
 
 ```bash
 # List all recovered classes and their virtual function tables:
