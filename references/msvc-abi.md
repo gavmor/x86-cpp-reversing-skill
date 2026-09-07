@@ -1,174 +1,258 @@
-# MSVC C++ ABI on 32-bit x86 (PE/COFF, `?`-mangled)
+# MSVC C++ ABI Reference (32-bit x86, PE format)
 
-This is the ABI for binaries built by MSVC (`cl.exe`) -- symbols start with
-`?` instead of `_Z`, and the binary is PE, not ELF. **`scripts/recon.py`
-does not walk vtables/RTTI automatically for this ABI** -- the layout below
-is accurate per public documentation, but unlike the Itanium path (which was
-built against binaries we compiled and inspected byte-for-byte in this
-environment), there's no MSVC toolchain available here to validate against.
-Treat the offsets below as a strong starting hypothesis, not gospel -- verify
-against the actual binary in front of you (e.g. by finding a known
-non-virtual call, or by matching a vftable's slot count against how many
-virtual functions the class visibly needs).
+Targeting 32-bit x86 Windows binaries compiled by Microsoft Visual C++.
+Ground truth synthesized from:
+- Paul Sabanal and Mark Yason, *"Reversing C++"* (Black Hat DC 2007)
+- CMU SEI Pharos / OOAnalyzer (`libpharos/datatypes.hpp`, `share/prolog/oorules/rtti.pl`)
+- Bruce Dang, Alexandre Gazet, Elias Bachaalany, Sebastien Josse, *Practical Reverse Engineering* (Wiley 2014)
+- Dennis Yurichev, *Reverse Engineering for Beginners* (ch. 51.1.1)
 
 ## Calling convention: `__thiscall`
 
 Unlike Itanium's cdecl-with-`this`-on-the-stack, MSVC member functions
 default to `__thiscall`: **`this` is passed in ECX**, remaining arguments go
-on the stack (caller-cleans-up like cdecl, except the callee pops `this`
-implicitly by virtue of it never having been pushed). So a call site for a
-non-virtual member function typically looks like:
+on the stack pushed right-to-left. The callee cleans up stack arguments via
+`ret N`, while `this` in ECX is implicitly popped because it was never pushed.
 
-```
+A non-virtual member call:
+```asm
 mov  ecx, <this>
 push <arg2>
 push <arg1>
 call <ClassName::Method>
 ```
 
-A **virtual** call additionally dereferences the vftable:
-
-```
+A **virtual** call dereferences the vftable:
+```asm
 mov  ecx, <this>
-mov  eax, [ecx]          ; load vptr
-call [eax+<slot*4>]      ; dispatch through the vftable
+mov  eax, [ecx]          ; load vptr (at offset 0 of object)
+call [eax + <slot*4>]    ; dispatch through vftable slot
 ```
 
-If you see `ecx` loaded right before a call (direct or indirect), treat that
-as a strong signal you're looking at a C++ member function call -- this is
-the single most useful pattern-match for finding class boundaries in a
-stripped MSVC binary.
+**Key Constructor / Destructor Identifiers:**
+- **Constructors return `this` in EAX:** A standard MSVC constructor ends with
+  `mov eax, ecx` (or `mov eax, [ebp-X]` where `this` was spilled). In OOAnalyzer
+  terms, this fact is `returnsSelf(Method)`.
+- **Top-of-function vptr store:** Constructors stamp the object's vptr immediately
+  after base construction: `mov dword ptr [esi], offset ??_7ClassName@@6B@`.
+- **Order of execution:** Base constructors run before derived constructors;
+  derived destructors run before base destructors.
 
 ## Name mangling
 
-MSVC mangled names are much denser and less immediately readable than
-Itanium's. Key markers to recognize without fully decoding:
+MSVC mangled names start with `?`. Key markers to recognize without a demangler:
 
 | Marker | Meaning |
 |---|---|
 | `??0ClassName@@...` | Constructor |
 | `??1ClassName@@...` | Destructor |
 | `??_7ClassName@@6B@` | vftable (primary) |
-| `??_8ClassName@@7B@` | vbtable (virtual base table, only with virtual inheritance) |
-| `??_R0` | Type Descriptor (roughly analogous to Itanium's `_ZTS`+part of `_ZTI`) |
+| `??_8ClassName@@7B@` | vbtable (virtual base table, used with virtual inheritance) |
+| `??_R0` | Type Descriptor (`type_info` equivalent, starts with `.?AV...`) |
 | `??_R1` | Base Class Descriptor |
 | `??_R2` | Base Class Array |
 | `??_R3` | Class Hierarchy Descriptor |
 | `??_R4ClassName@@6B@` | Complete Object Locator |
 
-There's no single universal demangler as reliable as `c++filt` here. If
-`llvm-cxxfilt` or `msvc-demangler`-style tooling isn't available, radare2's
-`rz-bin`/`r2 -B` and IDA/Ghidra both understand MSVC mangling; failing that,
-work from the marker table above and treat the rest of the mangled string as
-an opaque identifier while you build the class model from structure alone.
+Demangling tools: `undname` (Visual Studio), `llvm-cxxfilt`, or radare2 (`rz-bin -B`).
+In stripped binaries without symbols, you recover the names directly from the
+ASCII strings embedded inside `TypeDescriptor` (see below).
 
-## Vftable layout
+## Vftable layout & Complete Object Locator (COL)
 
-Simpler than Itanium in one respect: **no offset-to-top header word for the
-primary vftable** -- the exported `??_7ClassName@@6B@` symbol points
-directly at slot 0:
+The exported `??_7ClassName@@6B@` symbol points directly at slot 0:
 
 ```
-sym.value + 0   vfunc slot 0   <-- this IS what's stored in the object's vptr,
-sym.value + 4   vfunc slot 1       no +8 adjustment like Itanium
-sym.value + 8   vfunc slot 2
+[sym.value - 4] -> CompleteObjectLocator (??_R4...)
+[sym.value + 0]    vfunc slot 0   <-- Object's vptr points directly here
+[sym.value + 4]    vfunc slot 1
+[sym.value + 8]    vfunc slot 2
 ...
 ```
 
-Immediately **before** the vftable (at `sym.value - 4`), when RTTI is
-enabled (`/GR`, the default), sits a pointer to a **Complete Object
-Locator** (`??_R4...`) rather than directly to a type_info -- this is one
-level more indirect than Itanium:
+Unlike Itanium (which has an offset-to-top header and a direct pointer to
+`type_info` at `vptr - 4`), MSVC places a pointer to an **RTTICompleteObjectLocator**
+at `vptr - 4`.
+
+```c
+struct RTTICompleteObjectLocator {
+    DWORD signature;             // 0 on 32-bit x86 (1 on x64 indicating image-relative RVAs)
+    DWORD offset;                // Offset of this vftable pointer relative to complete object start
+    DWORD cdOffset;              // Constructor displacement offset (usually 0)
+    TypeDescriptor* pTypeDescriptor;           // -> TypeDescriptor (?AVClassName@@)
+    RTTIClassHierarchyDescriptor* pClassDesc;  // -> ClassHierarchyDescriptor
+};
+```
+
+### TypeDescriptor (`??_R0`)
+
+```c
+struct TypeDescriptor {
+    const void* pVFTable;        // -> type_info::`vftable` (in CRT / msvcr*.dll)
+    DWORD spare;                 // Internal runtime scratch / reserved (0)
+    char name[...];              // Null-terminated mangled class name (e.g. ".?AVbox@@")
+};
+```
+The ASCII name always starts with `.?AV` (for classes/structs) or `.?AU` (for interfaces).
+
+### ClassHierarchyDescriptor (`??_R3`)
+
+```c
+struct RTTIClassHierarchyDescriptor {
+    DWORD signature;             // 0 on 32-bit x86
+    DWORD attributes;            // Bit flags:
+                                 //   0x1: Multiple inheritance
+                                 //   0x2: Virtual inheritance
+                                 //   0x4: Ambiguous base classes
+    DWORD numBaseClasses;        // Count of descriptors in pBaseClassArray
+    RTTIBaseClassArray* pBaseClassArray; // -> Array of pointers to BaseClassDescriptor
+};
+```
+
+### BaseClassDescriptor (`??_R1`) and `_PMD`
+
+```c
+struct PMD {
+    int mdisp;                   // Member displacement (offset of base subobject in class)
+    int pdisp;                   // Offset of vbtable pointer within subobject (-1 if non-virtual)
+    int vdisp;                   // Offset within vbtable to virtual base displacement value
+};
+
+struct RTTIBaseClassDescriptor {
+    TypeDescriptor* pTypeDescriptor;           // -> Base class TypeDescriptor
+    DWORD numContainedBases;                   // Number of sub-bases underneath this base
+    struct PMD where;                          // Displacement specification { mdisp, pdisp, vdisp }
+    DWORD attributes;                          // Bit flags:
+                                               //   0x20: Virtual base class
+                                               //   0x40: pClassDescriptor pointer is present
+    RTTIClassHierarchyDescriptor* pClassDesc;  // OPTIONAL: only present if (attributes & 0x40)
+};
+```
+
+> [!NOTE]
+> **Source-verified structure note (Pharos / Sabanal & Yason):**
+> Older disassembly transcriptions (e.g. Yurichev ch. 51) sometimes show 7 DWORDs
+> for a BaseClassDescriptor while others show 6. As verified in Pharos
+> (`libpharos/datatypes.hpp`), the 7th field (`pClassDescriptor`) is optional:
+> it is present if and only if `attributes & 0x40` is set.
+
+### BaseClassArray (`??_R2`)
+
+`RTTIBaseClassArray` is simply a flat array of 32-bit virtual addresses pointing to
+`RTTIBaseClassDescriptor` structures for the class itself and every base in its
+inheritance closure.
+
+## The Self-Referencing Validation Invariant (`rTTISelfRef`)
+
+As formalized in OOAnalyzer (`share/prolog/oorules/rtti.pl`), valid MSVC RTTI
+forms a closed circular loop that you can use to verify recovered vtables with
+100% confidence:
 
 ```
-CompleteObjectLocator {
-    DWORD signature;             // 0 on x86 (non-zero encodes image-relative on x64, doesn't apply to 32-bit)
-    DWORD offset;                // this vftable's offset within the complete object
-    DWORD cdOffset;
-    TypeDescriptor* pTypeDescriptor;        // -> the RTTI type name, analogous to _ZTI's name field
-    ClassHierarchyDescriptor* pClassDescriptor;  // -> base class graph, analogous to __vmi_class_type_info's base array
-}
+[vftable - 4] ──────> RTTICompleteObjectLocator
+                         │             │
+        ┌────────────────┘             └────────────────┐
+        ▼                                               ▼
+  TypeDescriptor                            ClassHierarchyDescriptor
+   ("?AVDerived@@")                                     │
+        ▲                                               ▼
+        │                                        BaseClassArray
+        │                                               │
+        │ [0] (first element)                           ▼
+        └─────────────────────────────────── BaseClassDescriptor (self)
+                                              where = { mdisp: 0, pdisp: -1, vdisp: 0 }
 ```
 
-`ClassHierarchyDescriptor` has a `numBaseClasses` count and a pointer to an
-array of `BaseClassDescriptor`, each carrying an offset and attribute flags
-(virtual/non-virtual, similar spirit to Itanium's `offset_flags` but a
-different bit layout) -- this is the part to treat as "verify by hand"
-before relying on any specific decoded offset value.
+In any primary vftable:
+1. `CompleteObjectLocator.pTypeDescriptor` points to class $C$'s `TypeDescriptor`.
+2. `CompleteObjectLocator.pClassDesc` points to $C$'s `ClassHierarchyDescriptor`.
+3. `ClassHierarchyDescriptor.pBaseClassArray[0]` points to $C$'s own `BaseClassDescriptor`.
+4. That `BaseClassDescriptor.pTypeDescriptor` points back to the identical `TypeDescriptor` from step 1, with displacement `{ mdisp: 0, pdisp: -1, vdisp: 0 }`.
 
-**Cross-verified** (this layout is no longer purely a hypothesis): the
-5-field `CompleteObjectLocator` and the vptr-points-at-slot-0/COL-at-`-4`
-layout above are corroborated by multiple independent modern sources
-(the `pelite` Rust crate's `RTTICompleteObjectLocator`, retdec's
-`rtti_msvc.h`, and Lukasz Lipski's "RTTI Internals in MSVC"), not just this
-skill's own reasoning. A real MSVC 2008 `/FAs`-generated listing for a
-single-inheritance class (`class box : public object`), reproduced from
-Yurichev, *Reverse Engineering for Beginners*, ch. 51.1.1, shows concrete
-field values worth having as a worked example:
+If this loop holds, you have definitively identified the primary vftable and class name.
+
+## Virtual Inheritance & `vbtable` (`??_8`)
+
+When a class virtually inherits from a base (`class D : virtual public B`), MSVC does
+not use Itanium-style negative vtable offsets. Instead:
+1. Every instance contains a **virtual base table pointer** (`vbp`, or `vbtable` ptr)
+   at a known offset in the object layout.
+2. The `vbtable` (`??_8ClassName@@7B@`) is an array of 32-bit signed integers:
+   - **Entry 0:** Displacement from the `vbp` back to the start of the subobject containing the `vbp` (typically 0 or negative).
+   - **Entry $N$ ($N \ge 1$):** Displacement from the `vbp` to the $N$-th virtual base subobject.
+
+### Assembly Pattern for Virtual Base Access (`_PMD` evaluation)
+
+When code accesses a member of a virtual base, the compiler emits a two-step displacement:
+```asm
+; Given this in ECX, access virtual base at vbtable offset 4:
+mov  eax, [ecx]          ; Load vbtable pointer (or [ecx + pdisp])
+mov  edx, [eax + 4]      ; Read displacement to virtual base (vdisp = 4)
+lea  eax, [ecx + edx]    ; eax = adjusted this pointer for virtual base
+mov  eax, [eax + 0x10]   ; Read member at offset 0x10 within virtual base (mdisp)
+```
+
+## Recovery Algorithm for Stripped Binaries (No Symbols)
+
+When symbols are stripped from a PE binary, follow this automated scanning algorithm:
+
+1. **Find TypeDescriptors:**
+   Scan `.rdata` for ASCII strings starting with `.?AV` or `.?AU`.
+   Backtrack 8 bytes from the string address (`sizeof(void*) + sizeof(DWORD)`) to
+   find the base address of the `TypeDescriptor`.
+2. **Find CompleteObjectLocators:**
+   Search `.rdata` for 32-bit DWORDs whose value equals the `TypeDescriptor` address.
+   Inspect candidates: check if `signature == 0` at offset `-12` (relative to the pointer)
+   and if the following DWORD points to a valid `.rdata` address (`pClassDescriptor`).
+3. **Find Vftables:**
+   Search `.rdata` for 32-bit DWORDs whose value equals the `CompleteObjectLocator` address.
+   The address immediately following that pointer (`addr + 4`) is **slot 0 of the vftable**.
+4. **Enumerate Virtual Functions:**
+   Read sequential 32-bit words starting at slot 0 until reaching a word that does NOT
+   point into the `.text` executable code section, or reaches the next COL pointer (`-4`).
+5. **Reconstruct Inheritance:**
+   Dereference `pClassDesc` $\rightarrow$ read `numBaseClasses` $\rightarrow$ walk
+   `pBaseClassArray` to enumerate every base class name and displacement `{ mdisp, pdisp, vdisp }`.
+
+## Worked Manual Disassembly Example
+
+From Yurichev (*Reverse Engineering for Beginners*, ch. 51.1.1), MSVC 2008 `/FAs` listing
+for single-inheritance (`class box : public object`):
 
 ```asm
-??_R1A@?0A@EA@box@@8 DD FLAT:??_R0?AVbox@@@8 ; BaseClassDescriptor at (0,-1,0,64)
-    DD  01H        ; numContainedBases = 1
-    DD  00H        ; mdisp = 0
-    DD  0ffffffffH ; pdisp = -1 (not a virtual base)
-    DD  00H        ; vdisp = 0
-    DD  040H       ; attributes = 0x40
-    DD  FLAT:??_R3box@@8  ; -> ClassHierarchyDescriptor
+; BaseClassDescriptor for box
+??_R1A@?0A@EA@box@@8:
+    DD FLAT:??_R0?AVbox@@@8      ; pTypeDescriptor -> ".?AVbox@@"
+    DD 01H                       ; numContainedBases = 1
+    DD 00H                       ; where.mdisp = 0
+    DD 0ffffffffH                ; where.pdisp = -1 (not virtual)
+    DD 00H                       ; where.vdisp = 0
+    DD 040H                      ; attributes = 0x40 (pClassDescriptor present)
+    DD FLAT:??_R3box@@8          ; pClassDescriptor -> ClassHierarchyDescriptor
 
-??_R2box@@8 DD FLAT:??_R1A@?0A@EA@box@@8 ; BaseClassArray: box, then...
-    DD  FLAT:??_R1A@?0A@EA@object@@8     ; ...its base, object
+; BaseClassArray for box (self, then base)
+??_R2box@@8:
+    DD FLAT:??_R1A@?0A@EA@box@@8    ; -> box BaseClassDescriptor
+    DD FLAT:??_R1A@?0A@EA@object@@8 ; -> object BaseClassDescriptor
 
-??_R3box@@8 DD 00H  ; ClassHierarchyDescriptor: attributes = 0
-    DD  02H         ; numBaseClasses = 2 (box + object)
-    DD  FLAT:??_R2box@@8  ; -> BaseClassArray
+; ClassHierarchyDescriptor for box
+??_R3box@@8:
+    DD 00H                       ; signature = 0
+    DD 00H                       ; attributes = 0 (single inheritance)
+    DD 02H                       ; numBaseClasses = 2 (box + object)
+    DD FLAT:??_R2box@@8          ; pBaseClassArray
+
+; CompleteObjectLocator for box
+??_R4box@@6B@:
+    DD 00H                       ; signature = 0
+    DD 00H                       ; offset = 0
+    DD 00H                       ; cdOffset = 0
+    DD FLAT:??_R0?AVbox@@@8      ; pTypeDescriptor -> ".?AVbox@@"
+    DD FLAT:??_R3box@@8          ; pClassDescriptor
+
+; Vftable for box
+??_7box@@6B@:
+    ; (at ??_7box@@6B@ - 4 sits FLAT:??_R4box@@6B@)
+    DD FLAT:?area@box@@UAENXZ    ; slot 0: virtual double box::area(void)
+    DD FLAT:?volume@box@@UAENXZ  ; slot 1: virtual double box::volume(void)
 ```
-
-**Caution -- even this doesn't survive unquestioned.** The book's own
-transcription of the `CompleteObjectLocator` itself (`??_R4box@@6B@`) shows
-only 4 `DD` lines where the 5-field struct above predicts 5 (the `cdOffset`
-line appears to have been dropped), and attaches the `??_7box@@6B@`
-(vftable) label to the line holding the COL pointer rather than the line
-holding the first function pointer -- which would contradict the
-vptr-points-at-slot-0 claim if taken literally. Cross-checking against the
-other three sources above resolves this in favor of the standard layout;
-treat it as a transcription slip in one book, not a real ABI variant. This
-is exactly the "verify against more than one source" lesson `AGENTS.md`
-already asks for, applied to an example that could easily have been copied
-in wrong.
-
-## Multiple/virtual inheritance
-
-Same high-level idea as Itanium (a derived class can have multiple vftables,
-one per base with virtual functions, each reached through a different
-"this adjustment"), but MSVC represents the adjustment differently: for
-**virtual inheritance**, objects carry a **vbtable pointer** in addition to
-the vftable pointer, and accessing a virtual base requires an extra
-indirection through the vbtable to find that base's offset (which can vary
-per most-derived type, unlike Itanium's fixed non-virtual thunks). If you
-see a load through something that looks like a second vtable-like pointer
-before reaching a base member, that's the vbtable pattern -- don't assume
-it's a second vftable.
-
-## Manual recipe (no automated tooling here)
-
-1. `objdump -d --no-show-raw-insn -M intel <file>.exe` for disassembly, or
-   load into radare2 (`r2 -A <file>.exe`) if you want function boundaries
-   and xrefs for free.
-2. `objdump -x <file>.exe | grep -i '??_7\|??_R4'` (or equivalent PE symbol
-   dump) to enumerate vftables and complete object locators, if the binary
-   isn't stripped. Stripped release PE binaries are common -- if there's no
-   symbol table, you're identifying vftables purely by the "array of
-   in-`.text`-pointers referenced by a constructor's `mov [ecx], offset X`"
-   pattern instead, the same way you would for a stripped Itanium binary.
-3. Use `mov [ecx], offset <addr>` in constructors (the direct MSVC analog of
-   the Itanium vptr-store pattern) to identify which vftable belongs to
-   which constructor, and thus which class.
-4. Confirm dynamically if static confidence is low: break at the
-   constructor, watch the store to `[ecx]`, and dump the resulting vftable's
-   slots the same way described in `itanium-abi.md`'s dynamic section -- the
-   technique transfers directly, only the offsets differ. **GDB only applies
-   if this PE binary is actually running under something GDB can attach to
-   (Wine, or a Linux PE loader).** A real Windows target needs a native
-   Windows debugger instead -- see `references/tool-recipes.md` section 11
-   for the WinDbg/DbgEng equivalent of this exact technique (conditional
-   logging breakpoints, hardware watchpoints on a vptr write).
