@@ -334,6 +334,10 @@ next one:
    pattern gives you the stride directly, same as section 9.4), then work
    out which field offset within each record holds the id. The call site you
    started from tells you almost nothing further; the table's layout does.
+   **Dump the table's actual bytes before naming what it holds** (10.8) —
+   a single `cmp`/`je` against a table slot cannot distinguish a pointer
+   table from a flag mask from a kind enum, but the data can. And check for
+   a parallel per-entry metadata table while you are there (10.9).
 
    **Why a bounds check next to a `[reg*scale + disp]` access is decisive,
    not just suggestive:** a single textual xref to `disp` combined with a
@@ -549,6 +553,88 @@ not from where a prior doc said the call originates) before building
 attribution on top of it; a doc written before a later fix can describe a
 call path, table layout, or field offset that was true once and silently
 went stale.
+
+### 10.8 Read the table's bytes before inferring what the table *is*
+
+Everything above walks *instructions*. The decisive evidence for what an
+indexed table actually holds is usually the **static data itself**, and the
+single most common failure in this whole workflow is naming a table's
+semantics from the one instruction that touches it.
+
+Concretely: `cmp DWORD PTR [edi*4+0x532148], ebx` / `je bail` reads exactly
+like a "look up the pointer for this id, bail if it isn't loaded" — a
+null-check on a runtime pointer table. It is equally consistent with a static
+`int[N]` of 0/1 flags, a table of small enum kinds, or an array of indices
+into a *different* table. The instruction cannot distinguish these. The bytes
+can, instantly:
+
+```bash
+# resolve the table's file offset from its VMA, then dump N dwords
+objdump -h <binary> | grep -A1 '\.data'          # VMA vs File off for the section
+python3 -c "
+import sys
+vma,secva,secoff,n = 0x532148, 0x51e000, 0x11bc00, 271
+data = open(sys.argv[1],'rb').read()
+off  = vma - secva + secoff
+vals = [int.from_bytes(data[off+4*i:off+4*i+4],'little') for i in range(n)]
+print('distinct values:', sorted(set(vals))[:12])
+print('nonzero count :', sum(1 for v in vals if v))
+" <binary>
+# r2 equivalent: px 1084 @ 0x532148   (or  pxw 271*4 @ 0x532148)
+```
+
+If the distinct values are `{0, 1}` it is a flag mask, not pointers. If they
+are plausible code/data addresses it really is a pointer table. If they are
+small integers with runs, it is a kind/type table (see 10.9). A table that is
+**never written at runtime** — no fill loop anywhere, and its only xref is the
+read you started from — is by definition static content shipped in the image,
+so read it out of the image. "Only one xref" is evidence *for* a static table,
+not proof of a hidden populating loop.
+
+Do this *before* writing down what the table means. An inferred semantic that
+gets recorded as a fact will be built on by everything downstream, and the
+whole point of the confidence column in 10.5 is defeated if the confirmed rows
+were never actually confirmed.
+
+### 10.9 Look for a parallel per-entry metadata table
+
+When a binary loads a container of **N** indexed entries (section 9), look for
+a second, **N-entry** table describing them — kind/type, flags, priority,
+group id. These are extremely common in game and asset formats, and finding
+one converts "I have N opaque blobs" into "I know what each blob is for"
+faster than any amount of analysis of the blobs themselves.
+
+How to spot one:
+
+- Size is the giveaway: a table whose length is exactly `N`, `N*2` or `N*4`
+  bytes for the same N the container header declares. If the container says
+  1101 entries, grep the data section for a 1101-byte run of small values.
+- It is usually read right next to the container load, and its base pointer
+  cached into a global (`mov [<global>], offset <table>`) during init.
+- It typically feeds a `switch` — the per-entry kind selects a playback /
+  render / parse path, so the table's consumer is a jump table.
+- **Run-length structure is meaningful.** Contiguous runs of one kind are
+  banks/sections of the container, and an alternating pattern (`1,3,1,3,…`)
+  across a range means entries are **paired** — two halves of one logical
+  asset (intro + continuation, header + payload, base + overlay), not N
+  independent items. This is the kind of structure that is nearly impossible
+  to infer correctly from the decoded asset data alone, and trivial to read
+  off the table.
+
+Decode the consumer's jump tables to name the kinds (`objdump`/`r2` at the
+`jmp dword [reg*4 + <tbl>]` target, then walk each case). The cases are the
+engine's own behaviour spec for that asset type — variation, looping, and
+delay logic recovered this way is authoritative in a way that guessing from
+the asset payload never is.
+
+**Worked example (Esoteria, 1998).** A 1101-entry audio container yielded 785
+extracted segments whose even/odd alternation was "explained" by duration and
+amplitude statistics as loop-bodies vs. transitions. Wrong. A 1101-byte kind
+table sitting parallel to the container (base cached to a global at init, fed
+to two jump tables) showed the real structure: ids 0-270 one-shot SFX,
+300-699 alternating intro(even)/continuation(odd) **pairs**, 750-802 a second
+SFX bank. Signal analysis of the payload had produced a confident, plausible,
+and incorrect answer to what was actually a data-structure question.
 
 ## 11. WinDbg: dynamic analysis for native Windows PE binaries
 

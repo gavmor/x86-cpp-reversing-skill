@@ -44,6 +44,9 @@ Reverse-engineers 32-bit little-endian x86 (IA-32) binaries compiled from C++. F
 | *"I can just read pointer values directly out of `.rodata` / `.data` bytes."* | **False for PIE/DSO targets.** Position-independent binaries use dynamic relocations for vtables and RTTI pointers. Raw bytes are often placeholder zeroes. You MUST check the relocation table (`readelf -r` or LIEF). |
 | *"I'll dump the whole 500-line function disassembly into context."* | **Context poison.** Use targeted disassembly (`objdump -d --start-address=...`), radare2 JSON (`pdfj`), or backward slicing (`scripts/backward_slice.py`). Focus only on vptr assignments, loop strides, and call setups. |
 | *"Static xref sweeps returned 0 hits, so this code or table is dead."* | **Premature.** Check for indirect dispatch via function-pointer tables, `vbtable` adjustments, dynamic registration, or thin SEH wrappers before concluding code is unreferenced. |
+| *"This table's only xref is one read, so a hidden loop must populate it at runtime."* | **Usually backwards.** A table that is read but never written is most often **static content shipped in the image** — read it out of the file (`references/tool-recipes.md` §10.8) before hunting a fill loop that does not exist. |
+| *"The `cmp [tbl+idx*4], 0` / `je` means it's a pointer table and null means 'not loaded'."* | **Unproven.** That instruction is equally consistent with a 0/1 flag mask, a small-enum kind table, or indices into another table. One instruction cannot disambiguate; the bytes can. Dump them (§10.8). |
+| *"I characterised the asset payloads statistically, so I know how the entries relate."* | **Wrong tool.** Grouping/pairing/looping structure usually lives in a **parallel per-entry metadata table** shipped alongside the container (§10.9), not in the payload. Signal analysis of payloads yields confident, plausible, wrong answers to data-structure questions. |
 | *"The decompiled output looks like a flat C struct, so there is no inheritance."* | **Check calling conventions.** Compilers inline constructors. Look for `thiscall` (`ecx` loaded prior to call), `returnsSelf` (`eax == ecx`), and nested subobject offsets (`lea ecx, [esi + disp]`). |
 | *"I don't need to verify against two sources; one textbook/blog said so."* | **Verify primary sources.** Disassembly transcriptions in literature frequently contain errata (e.g. missing `cdOffset` fields or wrong vptr targets). Corroborate against verified schemas in `references/msvc-abi.md`. |
 
@@ -63,7 +66,7 @@ Reverse-engineers 32-bit little-endian x86 (IA-32) binaries compiled from C++. F
 - If 64-bit or big-endian, **STOP** — the 4-byte pointer arithmetic throughout this skill will produce invalid offsets.
 - **Pivots:**
   - *Flat procedural code (no vtables)?* $\rightarrow$ `references/tool-recipes.md` §9 (custom loaders) or §13 (data-table field attribution).
-  - *Indexed resource binding?* $\rightarrow$ `references/tool-recipes.md` §10.
+  - *Indexed resource binding?* $\rightarrow$ `references/tool-recipes.md` §10. Before naming any table's semantics, dump its bytes (§10.8), and check for a parallel per-entry metadata table (§10.9) — both are cheap and routinely decide the answer that instruction-reading alone gets wrong.
   - *Obfuscated instructions / desynced disasm?* $\rightarrow$ `references/obfuscation.md`.
   - *Debugger detects attachment / crashes?* $\rightarrow$ `references/anti-debugging.md`.
 
