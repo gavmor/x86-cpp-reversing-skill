@@ -190,3 +190,151 @@ r2 -q -c "aaa; s <callee_addr>; pdf" <binary>        # read the real validator
 # strip ANSI color codes when saving output for repeated grep/sed passes:
 r2 -q -c "aaa; s <addr>; pdf" <binary> | sed 's/\x1b\[[0-9;]*m//g' > /tmp/fn.txt
 ```
+
+## 10. Resource-binding recovery: mapping a data-file's indexed entries to the code that uses them
+
+Section 9 recovers a **container of N indexed entries** (sounds, textures,
+sprites, models). Vtable/RTTI work (sections 2-6 of the main workflow)
+recovers **a set of classes**. Neither answers the question that's usually
+the actual point of reversing a game binary: *which class or subsystem uses
+entry #47?* -- "which enemy screams with this sound," "what triggers this
+texture load." That's a different technique -- xref sweeping from the
+resource-access API outward, not class-hierarchy recovery -- so it gets its
+own recipe.
+
+### 10.1 Find the resource-access API
+
+The function that takes an index and does something with it is not always a
+clean, directly-called symbol:
+
+- **Thin wrapper.** Same pattern as section 9 -- an SEH/error-string wrapper
+  may sit between the call sites you can find and the real access logic one
+  call deeper. Follow every call in a short wrapper before treating it as
+  "the" API.
+- **Function-pointer slot indirection.** The real handler may be installed
+  into a global fn-ptr slot at init time (`mov [slot], offset <fn>`) rather
+  than called by name. If a symbol-based or `axt` xref sweep on the handler
+  itself comes up empty, that's the tell: find every write to the slot first
+  (`nm`/`objdump -s`/`r2 axt` on the slot address itself, not the function)
+  to enumerate every handler ever installed there, then find where the slot
+  is *read and called* (`call dword [<slot_addr>]`) -- that call instruction,
+  not any function symbol, is the real fan-in point to sweep.
+- **Inlined dispatch.** If the compiler inlined a small index-dispatch at
+  every use site, there is no single "the API" function to xref. Sweep from
+  the underlying data instead -- the table's base symbol or the offset
+  computation pattern (`lea <reg>, [<index_reg>*<stride> + <table_base>]`) --
+  rather than from a function that doesn't exist as a standalone symbol.
+
+### 10.2 Enumerate call sites
+
+```bash
+r2 -q -c "aaa; axt @ <api_addr>" <binary>            # who calls/reads this address
+r2 -q -c "aaa; axt @ <slot_addr>" <binary>           # for the fn-ptr-slot case: who writes AND who reads the slot
+objdump -d -M intel <binary> | grep -B2 'call.*<api>' # binutils fallback: literal push before call
+```
+
+### 10.3 Recover the index argument at each call site
+
+Ordered easiest to hardest -- try each in order before assuming you need the
+next one:
+
+1. **Literal immediate.** `push 0x2f` (or `mov eax, 0x2f` under thiscall)
+   immediately before the `call`. Read it directly; no further work needed.
+2. **Runtime-computed value.** Backward-slice the argument register/stack
+   slot within the enclosing function -- walk backward from the `push`/`mov`
+   to whatever instruction last wrote that register (`pdf` in r2, or read the
+   `objdump` listing by hand) until it bottoms out at either a literal or a
+   memory load.
+3. **`this`-relative / thiscall argument.** Under MSVC thiscall (see
+   `references/msvc-abi.md`), the index may come from the object itself:
+   `mov eax, [ecx+<off>]` followed by `push eax` means the *field offset*
+   `<off>` within the object is the real target of interest, not a single
+   fixed index -- every instance of that class supplies its own index through
+   that field.
+4. **Table-sourced index.** If the backward slice bottoms out at a memory
+   load rather than a literal, the xref sweep has only found *the table
+   reader* -- the real per-entity mapping lives in the table's row layout,
+   not in code. This is now a data-table problem, structurally identical to
+   section 9's file-format work: find the table's base address and stride
+   (a loop incrementing by a fixed size, or a `[reg*N + base]` addressing
+   pattern gives you the stride directly, same as section 9.4), then work
+   out which field offset within each record holds the id. The call site you
+   started from tells you almost nothing further; the table's layout does.
+
+### 10.4 Attribute the call site to an owner
+
+- **RTTI/vtable path (when available).** If the call site is inside a member
+  function, the demangled enclosing function name gives you the owning class
+  directly -- cross-check against `references/itanium-abi.md` or
+  `references/msvc-abi.md`. This is the common case and needs no further
+  technique.
+- **Stripped MSVC fallback (no RTTI).** When the enclosing function's own
+  name is unavailable:
+  - Nearby string literals in the same function (level names, debug
+    asserts, `"You die."`-style text) are often the fastest attribution --
+    weaker evidence than a symbol, so mark it inferred.
+  - The function's *other* behavior (what other globals/subsystems it
+    touches) as a smell test for which subsystem owns it -- also inferred,
+    not confirmed.
+  - Dynamic capture of `this`: break at the call site, dump `ecx`
+    (`x/8xw $ecx`), and check offset 0 for a vptr even if the binary exports
+    no RTTI -- many MSVC classes still carry a vptr for virtual dispatch
+    without exported type descriptors. Diff that vtable's address against
+    vtables you've already identified via `mov [ecx], offset <vtable>` in
+    constructors (`references/msvc-abi.md` section on vftable identification)
+    to name the type even without a demangled symbol.
+
+### 10.5 Present the result
+
+A table, not prose: `index | evidence (address / log line / table offset) |
+owner (class/subsystem) | confidence (confirmed/inferred) | note`. Keep
+confirmed rows (a literal push, a captured runtime log, a direct RTTI match)
+visually distinct from inferred ones (nearby strings, behavioral smell test)
+-- the whole point of this deliverable is that a later reader can tell which
+rows to trust without re-deriving them.
+
+### 10.6 Dynamic capture -- often higher-yield than static slicing
+
+When call sites are numerous, the index is table-sourced, or static
+confidence is just low, prefer *observing* over inferring:
+
+```
+(gdb) break *0x<api_addr>
+(gdb) commands
+  > silent
+  > printf "idx=%d retaddr=%p ecx=%p\n", <idx_reg>, $ra, $ecx
+  > continue
+> end
+(gdb) run
+```
+Play the game (or drive whatever triggers the call) and correlate observed
+behavior with logged indices in real time -- "walk into water, see `idx=47`
+logged" turns an inference problem into an observation problem. This extends
+section 7's GDB techniques with a non-stopping logging breakpoint instead of
+a one-shot break.
+
+For a long play session where an attached interactive debugger is too
+disruptive, an inline hook that logs the same tuple to a file without
+stopping execution is a viable lower-overhead alternative -- game-modding
+toolkits built around AOB (array-of-bytes) signature scanning plus inline
+hooking (e.g. `tkhquang/DetourModKit`) exist specifically for this pattern:
+scan for the call site's byte signature, install a hook that logs and calls
+through, then play normally.
+
+**Differential technique:** trigger one in-game event repeatedly (open the
+same door, walk into the same water tile) and diff the captured index sets
+across runs -- the index specific to that event is the one that shows up
+every time, separable from ambient/background triggers that don't correlate
+with the action.
+
+### 10.7 Don't trust inherited "X calls Y" claims
+
+A documented claim that gameplay code calls a specific low-level function or
+writes a specific global directly is frequently really "gameplay calls a
+wrapper that eventually reaches it" -- especially across a subsystem
+boundary (gameplay -> audio, gameplay -> renderer) you haven't fully mapped
+yet. Re-derive the xref chain yourself (`axt` from the actual global/function,
+not from where a prior doc said the call originates) before building
+attribution on top of it; a doc written before a later fix can describe a
+call path, table layout, or field offset that was true once and silently
+went stale.

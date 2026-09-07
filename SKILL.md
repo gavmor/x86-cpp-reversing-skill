@@ -43,6 +43,12 @@ is really "recover a custom file format this binary loads," pivot to
 site to the real validator, which is often hidden one call behind a thin
 SEH/error-string wrapper).
 
+**1c. Know a data file has N indexed entries but not which code uses entry
+K?** That's resource-binding recovery, not class recovery or file-format
+recovery -- a distinct technique (xref-sweep outward from the
+resource-access API, not from a vtable or a container-open call). Pivot to
+`references/tool-recipes.md` section 10.
+
 **2. Tell ELF/Itanium apart from PE/MSVC -- the ABI is genuinely different.**
 Symbols starting with `_Z` (demangle with `c++filt`) mean Itanium ABI,
 almost always an ELF binary from GCC/Clang. Symbols starting with `?` mean
@@ -129,5 +135,5 @@ address, a symbol name, a relocation) rather than stated as bare assertions
 |---|---|
 | `references/itanium-abi.md` | Working with `_Z`-mangled (GCC/Clang, usually ELF) binaries -- vtable layout, RTTI structure decoding, multiple inheritance thunks, the abstract-class null-slot gotcha, cross-DSO relocation handling. |
 | `references/msvc-abi.md` | Working with `?`-mangled (MSVC, PE) binaries -- thiscall convention, vftable/Complete-Object-Locator layout, manual recovery recipe (no automated script backs this ABI). |
-| `references/tool-recipes.md` | You need the exact command for a specific job -- triage, symbol dumping, per-function disassembly, radare2/r2pipe JSON queries, GDB dynamic-analysis recipes, compiling your own reference binary for comparison. |
+| `references/tool-recipes.md` | You need the exact command for a specific job -- triage, symbol dumping, per-function disassembly, radare2/r2pipe JSON queries, GDB dynamic-analysis recipes, compiling your own reference binary for comparison, reversing a custom file-format loader (section 9), or mapping a data file's indexed entries to the code that uses them (section 10). |
 | `scripts/recon.py` | Run directly (not just read) against ELF binaries for automated binfo + demangled symbols + full vtable/RTTI recovery. `python3 scripts/recon.py <binary>` with no args prints usage. |
