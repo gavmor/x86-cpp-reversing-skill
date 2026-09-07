@@ -596,3 +596,168 @@ typed WinDbg commands -- `IDebugControl4` (process control),
 `IDebugDataSpaces4` (`ReadVirtual`/`WritePhysical`), `IDebugRegisters2`,
 `IDebugSymbols3`, `IDebugClient5` -- the WinDbg equivalent of driving GDB
 from a Python script via `pwntools`' `gdb.debug()` (section 7).
+
+## 12. Automated C++ class recovery with OOAnalyzer (CMU SEI / Pharos)
+
+For 32-bit x86 Windows PE binaries compiled by MSVC, the Pharos framework's
+`ooanalyzer` (`git@github.com:cmu-sei/pharos.git`) automates what would
+otherwise take days of manual assembly tracing. It extracts ground facts using
+ROSE and evaluates them using a SWI-Prolog reasoning engine
+(`share/prolog/oorules/*.pl`).
+
+### Capabilities verified from primary source (`ooanalyzer.pod`, `datatypes.hpp`)
+- Reconstructs complete C++ class hierarchies, inheritance trees, and member layouts.
+- Identifies constructors, destructors, and method associations.
+- **Virtual Call Resolution:** Resolves indirect virtual calls (`call [eax + slot]`)
+  to concrete function addresses by tracking object types and vftable assignments.
+- Resolves RTTI metadata even when obfuscated or stripped of symbols.
+
+### Usage Recipe
+
+```bash
+# Run OOAnalyzer and export JSON results:
+ooanalyzer --json=recovered_classes.json <binary.exe>
+
+# Also export intermediate Prolog facts for manual queries:
+ooanalyzer --json=out.json --prolog-facts=facts.pl --prolog-results=results.pl <binary.exe>
+```
+
+### Inspecting Results (`jq`)
+
+The resulting JSON output maps directly to the class model:
+
+```bash
+# List all recovered classes and their virtual function tables:
+jq -r '.structures[] | "\(.name): vftable=\(.vftables[0].ea) size=\(.size)"' recovered_classes.json
+
+# Find all resolved virtual call sites:
+jq -r '.calls[] | select(.virtual == true) | "\(.call_site): calls \(.target_name) (\(.target_ea))"' recovered_classes.json
+```
+
+### IDA Pro / Ghidra Integration
+OOAnalyzer includes plugins to annotate disassemblers with the recovered types:
+- **IDA Pro:** `tools/ooanalyzer/ida/OOAnalyzer.py` loads the JSON file and applies
+  struct definitions, class names, method signatures, and virtual call comments.
+- **Ghidra:** The Ghidra plugin (under `tools/ooanalyzer/ghidra`) imports the JSON
+  to create matching data types and namespace symbols.
+
+---
+
+## 13. Data-table field attribution and struct recovery (Dang et al. / REWARDS / TIE)
+
+Stripped binaries with procedural code, game subsystems, or internal tables
+often store complex data without vtables or symbols. Reconstructing structs
+manually from assembly requires observing pointer arithmetic and memory access
+envelopes.
+
+### 13.1 Manual Assembly-Level Struct Reconstruction (Dang et al., ch. 1)
+
+1. **Base Pointer Tracking:**
+   Identify registers holding object pointers (e.g. `esi` maintained across loops,
+   or `ecx` in `__thiscall` methods).
+2. **Displacement Mapping:**
+   Record every `[base + disp]` offset. Each distinct displacement indicates a
+   struct member boundary:
+   - `mov [esi + 0x00], eax` $\rightarrow$ member at offset `0x00` (4 bytes).
+   - `mov word ptr [esi + 0x04], cx` $\rightarrow$ member at offset `0x04` (2 bytes).
+   - `mov byte ptr [esi + 0x06], dl` $\rightarrow$ member at offset `0x06` (1 byte).
+   - `mov [esi + 0x08], ebx` $\rightarrow$ member at offset `0x08` (4 bytes).
+3. **Subobject Composition vs. Inheritance:**
+   If a function passes `[esi + offset]` as `this` (`lea ecx, [esi + 0x20]; call ctor`),
+   the parent object has an embedded composite object or non-virtual base
+   subobject located at offset `0x20`.
+
+### 13.2 Formalizing Record Bounds and Field Types (REWARDS & TIE)
+
+Formalized by Lin et al. (*REWARDS*, NDSS 2010) and Lee et al. (*TIE*, NDSS 2011):
+
+1. **Record Boundary & Stride Analysis:**
+   - In table iteration loops, the increment applied to the index pointer in each
+     iteration is the **record stride** $S$:
+     ```asm
+     loc_loop:
+         ...
+         add  esi, 0x28       ; Record size is definitively 0x28 (40 bytes)
+         cmp  esi, edi
+         jne  loc_loop
+     ```
+   - **Displacement Envelope:** The minimum struct size is bounded by:
+     $$\text{Size} \ge \max(\text{displacement}) + \text{sizeof}(\text{access})$$
+2. **Instruction Type Constraints:**
+   The instruction opcode accessing `[base + offset]` strictly bounds the semantic
+   field type:
+   | Assembly Pattern | Semantic Type Inferred |
+   |---|---|
+   | `movzx eax, byte ptr [...]` / `cmp byte ptr [...], 1` | `bool` or `uint8_t` |
+   | `movsx eax, word ptr [...]` | `int16_t` |
+   | `fld dword ptr [...]` / `movss xmm0, [...]` | `float` (IEEE 754 single precision) |
+   | `fld qword ptr [...]` / `movsd xmm0, [...]` | `double` (IEEE 754 double precision) |
+   | `mov eax, [...]` followed by `test eax, eax` / `jz` | Pointer or opaque handle |
+   | `cmp dword ptr [...], 0x10` / `ja default_case` | Enumeration or bounded state tag |
+   | `lea eax, [...]` passed to string APIs (`strlen`/`printf`) | Embedded character array (`char[]`) |
+
+---
+
+## 14. Programmatic binary analysis recipes (Andriesse, *Practical Binary Analysis*)
+
+When interactive tools are impractical or batch processing is required, custom
+scripts using Python (`lief`, `capstone`) automate cross-reference sweeping,
+function boundary identification, and control-flow tracing.
+
+### 14.1 Programmatic Immediate Xref Sweeper (Python + Capstone + LIEF)
+
+To find all instructions referencing a target memory address (immediate data
+pointer or table offset) across `.text`:
+
+```python
+#!/usr/bin/env python3
+import sys
+import lief
+from capstone import Cs, CS_ARCH_X86, CS_MODE_32, x86
+
+if len(sys.argv) < 3:
+    print(f"Usage: {sys.argv[0]} <binary> <hex_target_addr>")
+    sys.exit(1)
+
+binary_path = sys.argv[1]
+target_addr = int(sys.argv[2], 16)
+
+binary = lief.parse(binary_path)
+text_sec = binary.get_section(".text")
+code = bytes(text_sec.content)
+base_addr = text_sec.virtual_address
+
+md = Cs(CS_ARCH_X86, CS_MODE_32)
+md.detail = True
+
+print(f"[*] Sweeping for xrefs to 0x{target_addr:08x} in .text (0x{base_addr:08x})...")
+for insn in md.disasm(code, base_addr):
+    for op in insn.operands:
+        # Check immediate operands (push offset, mov reg, offset)
+        if op.type == x86.X86_OP_IMM and op.imm == target_addr:
+            print(f"  [IMM XREF] 0x{insn.address:08x}: {insn.mnemonic} {insn.op_str}")
+        # Check memory displacements ([disp], [base + disp])
+        elif op.type == x86.X86_OP_MEM and op.mem.disp == target_addr:
+            print(f"  [MEM XREF] 0x{insn.address:08x}: {insn.mnemonic} {insn.op_str}")
+```
+
+### 14.2 Recursive Disassembly & Function Boundary Detection
+
+Linear sweep disassembly can be derailed by inline data, alignment padding
+(`0x90` / `0xCC`), and jump tables. A recursive traversal algorithm traces
+reachable instructions following branch targets:
+
+1. **Seed Queue:** Initialize a work queue with known entry points:
+   - File entry point (`AddressOfEntryPoint`).
+   - Exported function addresses (EAT).
+   - Targets of all direct `call rel32` instructions.
+   - Pointers discovered in vftables (slot 0, slot 1, ...).
+2. **Basic Block Traversal:**
+   Disassemble sequentially from current entry:
+   - On unconditional jump (`jmp target`): add `target` to queue; terminate current block.
+   - On conditional branch (`jz`, `jnz`): add both branch target and fallthrough address to queue.
+   - On `call target`: record `target` as a new function entry point; continue fallthrough.
+   - On `ret` / `ret N`: terminate basic block and function.
+3. **Boundary Calculation:**
+   A function's extent is the span from its lowest basic block address to the
+   highest return block, bounded by adjacent function entries.
