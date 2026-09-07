@@ -209,6 +209,16 @@ different from class recovery:
    bytes/entry) proves the assumption wrong: it's a flat single-`u32`-per-entry
    table, and the "size" you thought you saw was actually the next entry's
    offset.
+
+   **A concrete check for "is this stride actually linear," not just
+   eyeballed:** Ketterlin & Clauss (2014, Fig. 3) give the criterion --
+   at a loop header, a register's per-iteration update is `φ(R_out, R_in)`
+   (the value coming from outside the loop vs. the value carried from the
+   previous iteration). If `R_in` expands to `R + α` where `α` doesn't
+   change during the loop, then the register's value at iteration `I` is
+   exactly `R_out + I*α` -- a real, checkable proof the stride is linear
+   across the whole loop, not just true for the one or two iterations you
+   happened to read.
 5. **Re-verify data-driven hypotheses against the loader, don't just trust
    the last write-up.** If a bug was fixed based on an *empirical* pattern
    in the data (e.g. "these values are monotonic, so it must be a flat
@@ -654,6 +664,22 @@ same door, walk into the same water tile) and diff the captured index sets
 across runs -- the index specific to that event is the one that shows up
 every time, separable from ambient/background triggers that don't correlate
 with the action.
+
+**Capturing every entry of a large table dynamically gets expensive fast --
+"program skeletonization" (Ketterlin & Clauss, 2014, §4.2) is a portable
+way to cut that cost.** Rather than logging every iteration of a loop over
+N table entries, instrument only the loop's *leaf* registers (the values
+that don't depend on anything else already known -- initial pointers,
+input-derived values) and each memory access's computed address, once;
+then replay the *static* address-expression (recovered as above) through
+those few logged values to reconstruct the full per-entry trace without
+re-executing or re-logging each iteration. Reported reduction: "a factor
+of 3 to 4" fewer instrumentation points on floating-point-heavy code,
+~20% on integer-heavy code, and up to 25-fold on deeply-nested loops.
+Directly applicable here: if you already have the table's stride and base
+(section 9.4/10.3), you don't need a GDB/WinDbg/`tracer` breakpoint to
+fire on every one of N entries -- log the loop's few leaf inputs once and
+compute the rest.
 
 ### 10.7 Don't trust inherited "X calls Y" claims
 

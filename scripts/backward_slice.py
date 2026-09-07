@@ -15,6 +15,18 @@ could have influenced a given variable's value at a given point. This
 script computes exactly that slice, just for one register at one address
 in machine code instead of a source-level variable.
 
+Ketterlin & Clauss ("Recovering memory access patterns of executable
+programs," Science of Computer Programming 80, 2014) describe essentially
+this same substitution -- recursively replacing each register with its
+SSA definition back to a loop-invariant value or memory load (their
+`Expand()` procedure, restricted to linear ADD/SUB/scaled-MUL operations
+so the result stays a closed-form `register*scale+offset` expression) --
+as the formal basis for recovering a loop's address pattern without
+running it. What this script automates concretely via Triton, that paper
+describes as a hand-followable algorithm; see
+`references/tool-recipes.md` section 9.4/10.3 for the by-hand version when
+you don't want to set up the venv for a single address.
+
 Triton concretely emulates each instruction's semantics (including calls,
 jumps, and rets -- it isn't a linear disassembly walk), so it follows real
 control flow through calls and unconditional jumps on its own. The one
