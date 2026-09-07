@@ -362,6 +362,33 @@ next one:
    explosion problem of symbolic execution" -- if a slice or trace hangs or
    explodes in state count, check whether the code you're tracing through
    has one of these, rather than assuming the tool is broken.
+
+   **UbSym (Baradaran, Heidari, Kamali et al., *Int. J. Information
+   Security*, 2023) is a concrete, real, publicly-released mitigation for
+   exactly this path-explosion problem** -- an actual `angr` plugin, not
+   just a technique description (`github.com/SoftwareSecurityLab/UbSym`,
+   confirmed real and matching the paper's own claims). Rather than
+   symbolically executing the whole program, it statically identifies a
+   "unit" (the function containing a candidate vulnerability, found via
+   concrete VEX-IR pattern rules -- e.g. a `malloc` followed by a `Store`
+   writing more bytes than were allocated, for heap overflow) and runs
+   symbolic execution scoped to just that unit. To keep the result
+   meaningful for the *whole program's* real inputs (not just the unit in
+   isolation), it Monte Carlo-samples the input space, applies a
+   "treatment learning" algorithm (TAR3) to narrow the covering input
+   range, then curve-fits a function mapping system-level input to
+   unit-level input, walking up the constraint tree when no smooth
+   relationship exists at the current node. Benchmarked against MACKE and
+   Driller on NIST SARD programs: 1.00 accuracy/precision/recall on all
+   four vulnerability classes (heap overflow, stack overflow, use-after-
+   free, double-free) versus MACKE's recall as low as 0.21 on use-after-
+   free and Driller unable to detect use-after-free at all ("Driller only
+   detects vulnerabilities making the program crash") -- and 3-15x faster.
+   **Named limitations, not just strengths**: no pruning yet for
+   extremely large units (may fail to build the unit tree at all), and
+   stack-overflow detection is unsound by construction -- it only catches
+   overflows that corrupt the saved frame pointer, not ones that corrupt
+   only local variables without reaching it.
 3. **`this`-relative / thiscall argument.** Under MSVC thiscall (see
    `references/msvc-abi.md`), the index may come from the object itself:
    `mov eax, [ecx+<off>]` followed by `push eax` means the *field offset*
