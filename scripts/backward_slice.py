@@ -27,6 +27,23 @@ memory/registers you didn't set -- this is deliberately minimal (no
 --sym-config option) since the workflow's typical case is a straight run
 from function entry to a call site with no branches in between.
 
+Every section with real file content (`.text`/`.rodata`/`.data`/etc., not
+`.bss`) is preloaded into Triton's concrete memory before emulation starts.
+Without this, any instruction that reads *data* rather than code -- a
+global, a jump/lookup table, a string, a vtable slot -- would silently read
+0 instead of the real file bytes (verified directly: a global-array read
+through this script returned 0 pre-fix, the real value post-fix), which is
+worse than an error because it fails quietly rather than crashing. Indirect
+jumps through an in-file jump table (a `switch` statement) will therefore
+resolve to the real target now, rather than jumping to address 0 and
+immediately hitting the "no mapped content" error. This script still has no
+special jump-table *detection* -- it only benefits from correct data because
+the table's bytes are now actually present -- see Vishnyakov et al., "Sydr:
+Cutting Edge Dynamic Symbolic Execution" (ISPRAS, 2021), section V, for a
+more thorough jump-table/indirect-jump resolution technique if you need to
+enumerate *all* of a switch's targets rather than just follow the one your
+concrete inputs happen to take.
+
 REQUIRES A DEDICATED VENV. This machine (and possibly yours) may already
 have OpenAI's unrelated GPU-kernel-compiler package also importable as
 `triton` (a common transitive PyTorch dependency) -- if both are on
@@ -112,6 +129,16 @@ def main():
 
     ctx = TritonContext(ARCH.X86)
     ctx.setMode(MODE.ALIGNED_MEMORY, True)
+
+    # Without this, Triton's concrete memory is zero-filled everywhere except
+    # the code bytes fed to Instruction() below -- so any instruction that
+    # *reads data* (a global, a jump/lookup table, a string, a vtable slot)
+    # silently gets 0 instead of the real file content, rather than erroring.
+    # Preload every section that actually has file content (skips .bss/NOBITS,
+    # which is genuinely zero at load time -- Triton's default already matches).
+    for section in binary.sections:
+        if section.virtual_address and len(section.content) > 0:
+            ctx.setConcreteMemoryAreaValue(section.virtual_address, bytes(section.content))
 
     reg = getattr(ctx.registers, args.reg.lower(), None)
     if reg is None:
