@@ -335,6 +335,20 @@ next one:
    out which field offset within each record holds the id. The call site you
    started from tells you almost nothing further; the table's layout does.
 
+   **Why a bounds check next to a `[reg*scale + disp]` access is decisive,
+   not just suggestive:** a single textual xref to `disp` combined with a
+   preceding `cmp reg, N` / `jae`/`jl` bound is the exact signature Value-Set
+   Analysis (Balakrishnan & Reps, *WYSINWYX: What You See Is Not What You
+   eXecute*, PLDI 2004 / TOPLAS 2010) formalizes for proving a memory access
+   is a finite global array rather than an unbounded pointer -- the bound
+   establishes the register's value set, and the access pattern establishes
+   the array's element size and base. `DIVINE: DIscovering Variables IN
+   Executables` (Balakrishnan & Reps, VMCAI 2007) extends the same VSA
+   machinery specifically to aggregate/struct recovery. You're doing the
+   same proof by hand: the bound is what lets you trust `disp` is a table
+   base and not, say, an unrelated constant that happens to share a
+   displacement with something else nearby.
+
    **Watch for padding when computing a field's real size.** MSVC (and GCC)
    default to aligning every struct field to its natural boundary (a
    `char`/`short` field still occupies a full 4-byte-aligned slot, with the

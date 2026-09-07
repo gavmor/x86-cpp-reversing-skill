@@ -9,6 +9,12 @@ contributed to that register's value at that point -- the same technique
 Andriesse's *Practical Binary Analysis* ch. 13.3 demonstrates in C++, here
 as a directly runnable script instead of a from-scratch tool.
 
+"Backward slicing" is the formal term for this (Weiser, "Program Slicing,"
+ICSE 1981 / IEEE TSE 1984): the subset of a program's instructions that
+could have influenced a given variable's value at a given point. This
+script computes exactly that slice, just for one register at one address
+in machine code instead of a source-level variable.
+
 Triton concretely emulates each instruction's semantics (including calls,
 jumps, and rets -- it isn't a linear disassembly walk), so it follows real
 control flow through calls and unconditional jumps on its own. The one
