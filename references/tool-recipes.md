@@ -176,7 +176,13 @@ different from class recovery:
 1. **Find the load call site.** Grep strings/imports for the filename or
    extension (`izzj` in r2, or `strings <binary> | grep -i <ext>`), then
    `axt` (r2) or `nm`/xref-search the address to find what calls `open`/
-   `CreateFileA`/`fopen` with that string.
+   `CreateFileA`/`fopen` with that string. If the format has its own magic
+   number/signature (many do), searching for *that* constant and
+   cross-referencing it can land you closer to the validator directly,
+   skipping the file-open call entirely -- Shashidhar & Novak (*Digital
+   Forensic Analysis on Prefetch Files*, 2015) used exactly this against
+   `ntkrnlpa.exe`, searching for prefetch files' own `"SCCA"` signature
+   string rather than tracing from a file-open API.
 2. **Watch for a thin wrapper hiding the real logic one call deeper.** MSVC
    binaries commonly wrap the interesting function in an SEH prologue
    (`mov eax, fs:[0]` / `push -1` / `push <exception handler addr>`) whose
@@ -660,6 +666,15 @@ not from where a prior doc said the call originates) before building
 attribution on top of it; a doc written before a later fix can describe a
 call path, table layout, or field offset that was true once and silently
 went stale.
+
+This isn't specific to this skill's own history -- Shashidhar & Novak
+(2015) found the same failure mode independently while reversing Windows
+prefetch files, describing an earlier widely-cited writeup as one that
+"lacks academic scrutiny and seems to be composed using commercial
+software documentation, blogs, and Wikipedia," and that this "inadvertently
+introduces misconceptions" as a direct result. Same lesson, unrelated
+binary, unrelated researchers -- treat it as confirmation this is a
+general failure mode of secondhand technical writeups, not a one-off.
 
 ### 10.8 Read the table's bytes before inferring what the table *is*
 
