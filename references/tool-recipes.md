@@ -244,7 +244,19 @@ next one:
    slot within the enclosing function -- walk backward from the `push`/`mov`
    to whatever instruction last wrote that register (`pdf` in r2, or read the
    `objdump` listing by hand) until it bottoms out at either a literal or a
-   memory load.
+   memory load. When the slice spans a loop or several basic blocks and doing
+   this by hand gets error-prone, Triton (Andriesse, *Practical Binary
+   Analysis*, ch. 13.3) automates exactly this: it symbolically emulates from
+   a chosen entry point and, at the target address, calls
+   `api.sliceExpressions()` on the symbolic expression for the register in
+   question to get back the list of contributing instructions. Triton
+   supports 32-bit x86 directly (`triton::arch::ARCH_X86`, instruction
+   pointer `ID_REG_EIP`) -- confirmed in the book's own architecture-setup
+   code, not just x64 -- so it applies to this skill's binaries as-is. The
+   book's example loads the binary through its own libbfd-based loader, but
+   Triton's `Instruction::setOpcode`/`setAddress` only need raw bytes and an
+   address, so any other source (LIEF, r2's `pxj`) works as the byte feed if
+   you'd rather not adopt that loader.
 3. **`this`-relative / thiscall argument.** Under MSVC thiscall (see
    `references/msvc-abi.md`), the index may come from the object itself:
    `mov eax, [ecx+<off>]` followed by `push eax` means the *field offset*
@@ -314,17 +326,33 @@ section 7's GDB techniques with a non-stopping logging breakpoint instead of
 a one-shot break.
 
 For a long play session where an attached interactive debugger is too
-disruptive, an inline hook that logs the same tuple to a file without
-stopping execution is a viable lower-overhead alternative -- game-modding
-toolkits built around AOB (array-of-bytes) signature scanning plus inline
-hooking exist specifically for this pattern: scan for the call site's byte
-signature, install a hook that logs and calls through, then play normally.
-(`tkhquang/DetourModKit` implements this well -- `StringXref`/
-`xref_broad_match` for anchor-based call-site discovery, `mid_at()` for a
-logging-then-continuing mid-function hook -- but it's a **Windows x64**
-toolkit; treat it as a reference for the pattern, not a tool to run directly
-against a 32-bit target. Port the AOB-scan-plus-mid-hook idea rather than the
-library itself.)
+disruptive, log the same tuple without stopping execution instead:
+
+- **Pin (preferred -- confirmed 32-bit and Windows capable).** Intel Pin
+  ("currently supports Intel CPU architectures including x86 and x64 and is
+  available for Linux, Windows, and macOS" -- Andriesse ch. 9.3.2) is a
+  dynamic binary instrumentation engine built for exactly this: instrument
+  the call site with `INS_IsCall(ins)` to find it, then
+  `INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)log_fn, IARG_INST_PTR,
+  IARG_BRANCH_TARGET_ADDR, IARG_END)` (Andriesse ch. 9.4.4, Listing 9-4) to
+  register an analysis callback that fires every time, logs, and lets
+  execution continue -- no attached interactive debugger, works against the
+  running game the same as it would against `/bin/true` in the book's
+  example. Add `IARG_REG_VALUE` for the index/`this` register itself (Pin's
+  own API reference, not shown in the book's excerpted listing) to capture
+  the index alongside the call site.
+- **Inline-hook toolkits (pattern only, verify architecture first).**
+  Game-modding toolkits built around AOB (array-of-bytes) signature scanning
+  plus inline hooking follow the same idea from outside an official DBI
+  framework: scan for the call site's byte signature, install a hook that
+  logs and calls through, then play normally. `tkhquang/DetourModKit` is a
+  real, working example of this pattern (`StringXref`/`xref_broad_match` for
+  anchor-based call-site discovery, `mid_at()` for the logging-then-
+  continuing hook) but is **Windows x64 only** -- useful as a reference for
+  the technique, not a tool to run directly against a 32-bit target. Always
+  confirm a given toolkit's architecture support before adopting it, rather
+  than assuming a modding library that looks applicable actually targets
+  your bitness.
 
 **Differential technique:** trigger one in-game event repeatedly (open the
 same door, walk into the same water tile) and diff the captured index sets
