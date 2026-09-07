@@ -34,6 +34,15 @@ before trusting anything else -- the struct offsets everywhere in this skill
 assume 4-byte words. If it's 64-bit or a different architecture, stop and
 say so rather than silently misapplying 32-bit offsets.
 
+**1b. No vtables? It may be flat procedural C, not missing C++.** Old game
+engines especially often implement a subsystem (audio, save format, level
+data) as a static-globals C library with no classes at all -- `recon.py`
+correctly finding zero vtables is a valid result, not a failure. If the task
+is really "recover a custom file format this binary loads," pivot to
+`references/tool-recipes.md` section 9 (tracing from the `open`/`read` call
+site to the real validator, which is often hidden one call behind a thin
+SEH/error-string wrapper).
+
 **2. Tell ELF/Itanium apart from PE/MSVC -- the ABI is genuinely different.**
 Symbols starting with `_Z` (demangle with `c++filt`) mean Itanium ABI,
 almost always an ELF binary from GCC/Clang. Symbols starting with `?` mean

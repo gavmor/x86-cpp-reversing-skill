@@ -133,3 +133,60 @@ gdb -q ./test32                        # or objdump/recon.py the result
 `-g` debug info also lets you cross-reference addresses against source lines
 directly (`objdump --dwarf=decodedline`), which is often faster than
 reasoning from the assembly alone when you control the source.
+
+## 9. Reversing a custom binary file-format loader (no vtables involved)
+
+Not every 32-bit binary worth reversing has a C++ class hierarchy. Old game
+engines in particular often implement subsystems (audio, save files, level
+data) as **flat procedural C-style libraries** with a static globals block
+instead of objects -- there's no vtable to walk, and `recon.py`'s vtable
+recovery will (correctly) find nothing. When you need to recover a *custom
+container/file format* the binary loads at runtime, the workflow is
+different from class recovery:
+
+1. **Find the load call site.** Grep strings/imports for the filename or
+   extension (`izzj` in r2, or `strings <binary> | grep -i <ext>`), then
+   `axt` (r2) or `nm`/xref-search the address to find what calls `open`/
+   `CreateFileA`/`fopen` with that string.
+2. **Watch for a thin wrapper hiding the real logic one call deeper.** MSVC
+   binaries commonly wrap the interesting function in an SEH prologue
+   (`mov eax, fs:[0]` / `push -1` / `push <exception handler addr>`) whose
+   body is mostly a switch/jump-table translating an internal error code
+   into user-facing strings (`"Can't open sound data file"`,
+   `"Sound data file is corrupt"`, etc.) — the actual `open`/`read`/format
+   validation happens in a callee this wrapper invokes once, near the top.
+   Disassembling only the outer function and concluding "there's no real
+   parsing logic here" is a common false negative; follow every `call` in a
+   short wrapper before giving up on it.
+3. **Read the validator like a spec, not just a function.** The real payoff
+   function typically does, in order: `open()`, a small fixed-size `read()`
+   for a magic/header, then comparisons against **hard-coded constants**
+   (`cmp eax, 0x44d`) rather than trusting whatever the file says. Those
+   constants ARE the format spec — a `cmp` against a literal right after a
+   `read()` tells you a field's expected value and size far more reliably
+   than inferring it from one sample file.
+4. **A validation loop over a table tells you the table's true shape.**
+   If you see a loop incrementing a pointer by a fixed stride and comparing
+   `entry vs previous_entry` (monotonicity) or `entry & mask` (alignment),
+   that loop's stride *is* the true per-entry size — which settles disputes
+   a data-only inspection can't. E.g. a loop advancing by 4 bytes per
+   iteration over what you assumed was an `{offset,size}` pair table (8
+   bytes/entry) proves the assumption wrong: it's a flat single-`u32`-per-entry
+   table, and the "size" you thought you saw was actually the next entry's
+   offset.
+5. **Re-verify data-driven hypotheses against the loader, don't just trust
+   the last write-up.** If a bug was fixed based on an *empirical* pattern
+   in the data (e.g. "these values are monotonic, so it must be a flat
+   offset table") without re-disassembling the actual loader, treat that as
+   a hypothesis, not ground truth, until you've traced it back to the
+   validator itself — docs and commit messages claiming "confirmed against
+   the binary" can be aspirational and go stale the moment nobody re-checks
+   them against a later fix.
+
+```bash
+# generalized recipe used above (radare2):
+r2 -q -c "aaa; s <wrapper_addr>; pdf" <binary>       # read the wrapper, find the real callee
+r2 -q -c "aaa; s <callee_addr>; pdf" <binary>        # read the real validator
+# strip ANSI color codes when saving output for repeated grep/sed passes:
+r2 -q -c "aaa; s <addr>; pdf" <binary> | sed 's/\x1b\[[0-9;]*m//g' > /tmp/fn.txt
+```
