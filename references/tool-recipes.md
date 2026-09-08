@@ -218,6 +218,22 @@ symptom, don't guess:
 | A `push` of what looks like a code address is immediately followed by `ret`, with no `call`/`jmp` anywhere near the real target | Bloated-instruction xref evasion -- `jmp label` as `push label`/`ret`, or `call label` as `push return_addr`/`push label`/`ret` (Yurichev, ch. 50.2.2: "IDA will not show the references to the label") | Treat the `push`+`ret` pair as a disguised `call`/`jmp` and resolve the target by hand |
 | `call dword ptr [eax+14h]`-style dispatch, no xref found by any static tool | Virtual-call indirection -- the target is computed fresh per-instance from a vtable pointer, not one fixed global address | See section 10.6's IDA/IDC vtable-xref script, which resolves every real caller of every slot dynamically |
 
+**A verified nuance on that last row, worth not overstating:** "no xref found
+by any static tool" is true of the *call site* (confirmed directly: a
+register-indirect `call eax` produces zero outgoing xrefs from any static
+tool tried, `ghidra-cli` included), but the *vtable's own slots* are a
+separate, easier fact -- a vtable slot is just a data word containing a
+relocated function pointer, and `ghidra-cli`'s default auto-analysis
+resolves that slot-to-implementation mapping for free via its relocation
+analysis (`x-ref to <impl_addr>` on a virtual method returns a `DATA` xref
+from the vtable slot that holds it, confirmed against both a symbol-bearing
+and a fully stripped 32-bit binary). That's real progress -- it tells you
+every implementation a vtable *could* dispatch to -- but it is not the same
+fact as "this call site dispatches to this implementation" (10.4's actual
+problem), since a static slot-to-function link says nothing about which
+object's vtable pointer is live at a given call. Don't mistake the free
+slot-enumeration win for having solved the harder attribution problem.
+
 ### 10.2 Enumerate call sites
 
 ```bash
@@ -267,6 +283,38 @@ GUI). It does not extend to 10.6 below: `headless-ida` has no debugger or
 breakpoint capability at all, so the dynamic vtable-xref technique there
 still needs an interactive IDA session or one of the CLI-scriptable
 GDB/Pin/tracer alternatives documented in that section.
+
+**`ghidra-cli` (`github.com/akiselev/ghidra-cli` -- verified end-to-end
+this session, not just from docs) is the same idea with no license
+requirement at all.** It wraps Ghidra's own headless analyzer behind a
+`ghidra` binary and a persistent analysis "bridge," so there's no GUI step
+anywhere in the loop:
+
+```bash
+ghidra setup --java-home <jdk21+>       # one-time: auto-downloads Ghidra itself
+ghidra import <binary> --project <name> # imports AND runs full auto-analysis
+ghidra --project <name> --program <prog> x-ref to <addr>    # analog of axt/RfirstB
+ghidra --project <name> --program <prog> x-ref from <addr>  # analog of Rfirst/RnextB
+ghidra --project <name> --program <prog> decompile <addr|name>
+```
+
+Requires a full JDK 21+ (a JRE won't work -- `ghidra doctor` checks this and
+says so directly). Confirmed against a real 32-bit x86 PIE ELF, both with
+and without debug symbols: `import` correctly recovers function boundaries,
+`decompile` on a virtual-dispatch call site renders the indirect call *and*
+the table-index arithmetic in one shot (`(**(code **)*param_1)(param_1,
+*(undefined4 *)(&DAT_00014008 + param_2 * 4))` for a stripped binary --
+directly confirms 10.3 item 4's table-sourced-index case and 10.1's
+virtual-call-indirection case from decompiler output alone, no
+disassembly-by-hand needed).
+
+**Confirmed gotcha: importing a second, different binary into a project
+that already has one open can return a stale/wrong function list on a
+later query** (observed directly: a project that had two binaries imported
+returned 12 functions for a binary whose fresh, single-binary project
+correctly showed 37) -- import each binary into its own project, or verify
+a query's addresses actually fall inside the target binary's own sections
+(`ghidra ... memory map`) before trusting a suspiciously short result.
 
 ### 10.3 Recover the index argument at each call site
 
