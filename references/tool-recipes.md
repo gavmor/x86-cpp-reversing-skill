@@ -707,9 +707,44 @@ table sitting parallel to the container (base cached to a global at init, fed
 to two jump tables) showed the real structure: ids 0-270 one-shot SFX,
 300-699 alternating intro(even)/continuation(odd) **pairs**, 750-802 a second
 SFX bank. Signal analysis of the payload had produced a confident, plausible,
-and incorrect answer to what was actually a data-structure question.
+### 10.10 Headless PE static analysis when dynamic debuggers fail (ptrace-restricted sandboxes)
+
+Dynamic logging breakpoints (section 10.6 under Wine/GDB or section 11 under WinDbg) are ideal, but in containerized agent sandboxes, cloud CI, or unprivileged Linux environments, `SYS_PTRACE` is frequently denied (`ptrace: Operation not permitted` or `Inappropriate ioctl for device`). Dynamic tracing fails before the process spawns.
+
+When dynamic debugging is unavailable:
+1. **Never calculate PE file offsets naively.** In PE32 files, section `PointerToRawData` frequently differs from `VirtualAddress` (e.g. `.text` VA `0x1000` but file raw offset `0x400`). Slicing by `va - ImageBase` produces misaligned instruction streams. Always use `pefile.get_offset_from_rva()` or section `PointerToRawData`.
+2. **Correlate with container payloads directly.** If an API parameter is read off an instance field (e.g. `[esi + 0x188]`), trace that field back to its constructor or deserializer (`IStream::Read` / `LoadObject`). If it is deserialized from shipped data containers, write a 15-line script to unpack all container entries and inspect the distribution statically rather than waiting on a debugger.
+
+**Standard 10-line Python recipe for targeted PE disassembly and xref scanning:**
+
+```python
+import pefile
+from capstone import Cs, CS_ARCH_X86, CS_MODE_32
+
+pe = pefile.PE("TARGET.EXE")
+md = Cs(CS_ARCH_X86, CS_MODE_32)
+
+def disasm_vma(vma: int, size: int = 64):
+    rva = vma - pe.OPTIONAL_HEADER.ImageBase
+    raw_offset = pe.get_offset_from_rva(rva)
+    code = pe.__data__[raw_offset : raw_offset + size]
+    for insn in md.disasm(code, vma):
+        hex_bytes = " ".join(f"{b:02x}" for b in insn.bytes)
+        print(f"0x{insn.address:08x}:  {hex_bytes:<20} {insn.mnemonic} {insn.op_str}")
+
+# Find all 32-bit immediate or absolute address references across .text:
+def find_dword_refs(val: int):
+    target = val.to_bytes(4, "little")
+    for sec in pe.sections:
+        data = sec.get_data()
+        pos, base = 0, pe.OPTIONAL_HEADER.ImageBase + sec.VirtualAddress
+        while (pos := data.find(target, pos)) != -1:
+            print(f"Ref to {hex(val)} at 0x{base + pos:08x} ({sec.Name.decode().strip(chr(0))})")
+            pos += 1
+```
 
 ## 11. WinDbg: dynamic analysis for native Windows PE binaries
+
 
 Sections 7 and 10.6 use GDB throughout, but GDB only applies if the PE
 target is running under something GDB can actually attach to (Wine, or a
