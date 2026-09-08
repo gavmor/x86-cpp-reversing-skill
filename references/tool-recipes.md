@@ -298,8 +298,37 @@ ghidra --project <name> --program <prog> x-ref from <addr>  # analog of Rfirst/R
 ghidra --project <name> --program <prog> decompile <addr|name>
 ```
 
-Requires a full JDK 21+ (a JRE won't work -- `ghidra doctor` checks this and
-says so directly). Confirmed against a real 32-bit x86 PIE ELF, both with
+**Requires a full JDK 21+ (a JRE won't work), and on a fresh machine this is
+a real prerequisite to budget for, not a detail `setup` papers over** -- a
+typical sandboxed/CI box only has an old JRE (confirmed here: OpenJDK 8),
+and `ghidra setup --java-home <jdk21+>` needs that JDK to already exist
+somewhere before it can run at all. If there's no system JDK 21 and no root
+(`apt`/`pkexec` unavailable or denied), a user-local install works without
+privilege:
+
+```bash
+mkdir -p ~/.local/opt
+curl -sL "https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/eclipse" \
+  | tar -xz -C ~/.local/opt
+JDK21="$(echo ~/.local/opt/jdk-21*)"
+ghidra setup --java-home "$JDK21"
+```
+
+**Confirmed gotcha: `--java-home` on `setup` only affects that one
+invocation -- it does not persist.** `ghidra doctor` re-checks Java on every
+run and fails again the moment you drop the flag, because `setup` never
+writes `java_home` into `~/.config/ghidra-cli/config.yaml` (confirmed: it
+stayed `null` after a successful `setup --java-home ...` run). The obvious
+fix, `ghidra config set java_home <path>`, is itself broken in v0.2.2 --
+it errors `Unknown config key: java_home` even though that exact key is
+what `config list`/`doctor` both name. Edit the YAML directly instead:
+
+```bash
+sed -i "s|^java_home:.*|java_home: $JDK21|" ~/.config/ghidra-cli/config.yaml
+ghidra doctor   # re-run with no flag/env var to confirm it now passes on its own
+```
+
+Confirmed against a real 32-bit x86 PIE ELF, both with
 and without debug symbols: `import` correctly recovers function boundaries,
 `decompile` on a virtual-dispatch call site renders the indirect call *and*
 the table-index arithmetic in one shot (`(**(code **)*param_1)(param_1,
