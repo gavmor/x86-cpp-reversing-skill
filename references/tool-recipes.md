@@ -1338,6 +1338,20 @@ unknown_object` (an opaque/raw-bytes catch-all) covering whatever you
 haven't gotten to yet rather than blocking the whole spec on 100% coverage
 up front.
 
+**That example above only applies to a tag the file format itself defines
+as a fixed constant (a resource-type byte a loader chose once, at compile
+time) -- do not copy it verbatim for MFC's own `CArchive` class dispatch.**
+MFC's class-index tags (the `0x8001+` back-references in
+`references/mfc-carchive-serialization.md`'s wire format) are assigned
+**per-archive, in the order each class is first written to *that specific
+file*** -- there is no fixed, portable "tag N always means class X"
+mapping to hardcode into `cases:` the way the example above implies.
+Two real save files can (and typically will) assign the same class a
+different index, if their in-game object-creation order differed. See
+`references/mfc-carchive-serialization.md`'s "Dispatch is per-file, not a
+fixed mapping" section for the concrete failure mode and how to structure
+the spec instead.
+
 ---
 
 ## 14. Programmatic binary analysis recipes (Andriesse, *Practical Binary Analysis*)

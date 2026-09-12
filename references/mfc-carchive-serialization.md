@@ -130,6 +130,62 @@ lead, not noise -- either a class that's registered but never actually
 serialized in your sample set, or evidence your byte-pattern scan mismatched
 something).
 
+## Dispatch is per-file, not a fixed mapping -- a real Kaitai design trap
+
+**The class-index numbers in the wire format above (`0x8001+`) are not a
+fixed, portable "tag N always means class X" table -- they're assigned at
+write time, in whatever order that specific archive happens to first
+serialize each class.** This falls directly out of the source
+(`CArchive::WriteClass`/`ReadClass`, both confirmed above): both directions
+share one incrementing counter (`m_nMapCount`) and a map keyed by pointer
+identity (`m_pStoreMap` when writing, `m_pLoadArray` when reading) --
+`WriteClass` only emits the full `0xFFFF` new-class definition **the first
+time** a given `CRuntimeClass*` is seen in *that specific archive
+instance*; every later reference to the same class in the same file gets
+whatever small index it happened to be assigned, in encounter order. A
+different real file -- a different save, produced by a different play
+session that happened to construct its objects in a different order --
+will assign the same class a *different* index. There is no schema
+number, class-tag constant, or any other fixed identifier baked into the
+compiled game that maps a specific numeric tag to a specific class across
+files; the mapping only exists per-archive, built up as you read it.
+
+**Practical consequence for a `.ksy` spec:** don't write `switch-on:
+class_tag` with hardcoded `cases: 1: ClassA, 2: ClassB` the way
+`references/tool-recipes.md` §13.3's illustrative example does -- that
+pattern is only valid for a tag the file format itself defines as a fixed
+constant (e.g. a resource-type byte a loader chose at compile time), which
+this is not. Instead, the spec has to model the actual mechanism: read
+each `0xFFFF`-tagged definition as it's encountered and record `(the
+index it's assigned == however many classes have been seen so far) ->
+(the class name string just read)` in a running table, then resolve a
+later small-index tag against *that file's own table*, not a global
+constant map. Verify this empirically before trusting any spec: dump the
+class-tag sequence from two different real sample files and confirm the
+same class name gets a different index number in each -- if that never
+happens in your actual corpus (e.g. every file always constructs objects
+in the same fixed order), you can get away with a simpler fixed mapping,
+but confirm it rather than assume it.
+
+**A second, related trap: object instances (not just classes) can be
+back-referenced too** (the `0x0001-0x7FFE` object-tag range, same
+mechanism, separate map). If two different fields anywhere in the object
+graph ever point at the *same* underlying object (a shared sub-object,
+not just two separate instances of the same class), that object is
+written once and referenced by index everywhere else it's used -- a flat,
+sequential `.ksy` that just parses "one object, then the next" has no way
+to represent "this field is actually the same object as that one over
+there." Check for this empirically on a real sample before assuming a
+simple linear structure suffices: an object tag in the `0x0001-0x7FFE`
+range that *isn't* immediately preceded by that object's own `0xFFFF`
+class definition is a real back-reference, not a parsing artifact. If it
+turns out to occur, the practical fix is to have the `.ksy` expose a flat,
+indexed array of every object encountered (which it can do -- the byte
+boundaries and field values are still perfectly well-defined per object)
+and resolve which array slot a given back-reference tag points to as a
+post-processing step in whatever code consumes the parsed output, rather
+than trying to make the `.ksy` itself represent the aliasing.
+
 ## Putting it together with the rest of this skill
 
 - Use the `AfxClassInit` sweep (static, from the .exe) to get the full
@@ -137,11 +193,12 @@ something).
 - Use the class-name string scan (static, from real `.E3` files) to
   confirm which of those classes actually appear in your corpus, and as
   an independent cross-check on the first list.
-- Once you have schema number -> class name pairs, that's exactly the
-  finite, enumerable dispatch table `references/tool-recipes.md` section
-  13.3 describes writing as a Kaitai `switch-on: class_tag` -- one `case`
-  arm per row here, added as you recover each class's own `Serialize()`
-  layout by disassembly.
+- Once you have schema number -> class name pairs, you know the finite
+  set of classes a `.ksy` needs a type for -- but the *dispatch* between
+  them at any given point in a real file is the per-archive, encounter-order
+  index scheme above, not a fixed `switch-on` table keyed by those schema
+  numbers directly. See "Dispatch is per-file, not a fixed mapping" above
+  before writing the `.ksy`'s class-selection logic.
 - The wire format's own `m_pBaseClass` field (statically-linked case) also
   gives you real inheritance edges for free -- if two classes turn out to
   share a base per this field, that's ground truth for the "near-identical
