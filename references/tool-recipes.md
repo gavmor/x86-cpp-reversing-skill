@@ -207,6 +207,11 @@ r2 -q -c "aaa; s <addr>; pdf" <binary> | sed 's/\x1b\[[0-9;]*m//g' > /tmp/fn.txt
 
 *Anti-rationalization*: "The first few entries incremented by 4 bytes, so the stride is 4" is a sample, not step 4's proof -- confirm `α` is loop-invariant before trusting it past the entries you actually read. Shashidhar & Novak's magic-string entry point (searching for prefetch files' own `"SCCA"` signature in `ntkrnlpa.exe` rather than tracing a file-open API) is the concrete precedent for step 1's alternate route.
 
+Once you can state the field layout and stride with confidence (this
+section's exit criterion), section 13.3 turns that into a `.ksy` spec you
+can run against your whole corpus instead of trusting it stayed true past
+the sample you inspected.
+
 ## 10. Resource-binding recovery: mapping a data-file's indexed entries to the code that uses them
 
 Section 9 recovers a **container of N indexed entries** (sounds, textures,
@@ -1060,6 +1065,78 @@ Formalized by Lin et al. (*REWARDS*, NDSS 2010) and Lee et al. (*TIE*, NDSS 2011
    | `mov eax, [...]` followed by `test eax, eax` / `jz` | Pointer or opaque handle |
    | `cmp dword ptr [...], 0x10` / `ja default_case` | Enumeration or bounded state tag |
    | `lea eax, [...]` passed to string APIs (`strlen`/`printf`) | Embedded character array (`char[]`) |
+
+### 13.3 Kaitai Struct: turn the recovered layout into a checkable, reusable parser
+
+Sections 9 and 13.1/13.2 recover a container's field layout from the
+loader's disassembly, but the recipe stops at prose/comments once you know
+it -- nothing turns that recovery into an artifact you can *check*.
+[Kaitai Struct](https://kaitai.io) closes that gap: a declarative `.ksy`
+spec compiles to a real parser in any target language, so running it
+against every file in your corpus (not just the one sample you inspected)
+is now a mechanical check instead of a manual re-read.
+
+| Step | Action | Checkpoint |
+|---|---|---|
+| 1 | Install the compiler (JVM-based, no root needed) and a runtime for whichever target you'll run the generated parser in | `ksc --version` prints a version |
+| 2 | Write a `.ksy` from what 9/13.1/13.2 already recovered: magic/header fields, `repeat-expr`/`repeat: eos` for the table, one field per offset+instruction-type-constrained type | `kaitai-struct-compiler --target python your_format.ksy` exits 0 with no errors |
+| 3 | Run the generated parser against **every** file in your corpus, not just the sample you reverse-engineered | No exceptions; entry counts and field values look sane across the whole corpus, not just file #1 |
+| **Exit** | The spec parses the whole corpus without a human re-reading a single hex dump | A `.ksy` file, committed alongside your notes -- executable documentation, not prose that goes stale |
+
+```bash
+# one-time setup -- verified working end-to-end this session against a JDK 21 install
+# (didn't test the actual minimum version; it's JVM-based, so some JDK must be on PATH or at JAVA_HOME)
+curl -sL -o ksc.zip "https://github.com/kaitai-io/kaitai_struct_compiler/releases/download/0.11/kaitai-struct-compiler-0.11.zip"
+unzip -q ksc.zip && rm ksc.zip
+pip install kaitaistruct   # runtime needed to actually load the generated parser in Python
+
+./kaitai-struct-compiler-0.11/bin/kaitai-struct-compiler --target python your_format.ksy
+python3 -c "
+from your_format import YourFormat
+f = YourFormat.from_file('sample.dat')
+for e in f.entries:
+    print(e.some_id, e.offset, e.size)
+"
+```
+
+**Confirmed gotcha: an explicit `--target python your_format.ksy -d .` (outdir
+literally `.`) throws a spurious `. (Is a directory)` error and re-invokes
+itself once** -- omit `-d` (or point it at a real subdirectory) and it
+compiles cleanly on the first try.
+
+**Confirmed the hard way: a wrong stride does not necessarily throw an
+error.** An `entry` type declared one field short (8 bytes instead of the
+real 12-byte stride) still parsed a 3-entry test fixture successfully --
+every field after the mistake was just silently wrong (an id of `256`
+where the real value was `2`), not a crash. A `.ksy` spec only catches
+what it's told to check: give critical fields an explicit `valid:`
+constraint (a magic number, a bounded enum, a monotonic offset) so a wrong
+stride manifests as a thrown validation error instead of quietly
+desyncing every field downstream. Running against a whole corpus, not one
+file, is still the more reliable check -- a wrong stride's misalignment
+compounds, and eventually either runs past EOF or produces an
+obviously-insane field value on a large enough table even without an
+explicit `valid:` constraint.
+
+**Worked reference example, verified against the real spec (not
+paraphrased):** Quake's `.pak` format
+(`kaitai_struct_formats/game/quake_pak.ksy` -- compiles and runs cleanly)
+is structurally almost identical to this skill's own running example: a
+4-byte magic, a header pointing to an index table elsewhere in the file
+(`ofs_index`/`len_index`, Kaitai's `instances:` feature for a
+positionally-located field -- the same "table sourced from a pointer, not
+inline" shape section 10.3 item 4 describes), then fixed-stride entries
+(56-byte name + `u4` offset + `u4` size) each carrying an `instances:`
+field of their own that seeks to `ofs`/`size` to expose the actual payload
+bytes, not just the metadata. That last part -- the recovered table
+description doubling as an extractor for the *data* it describes -- is the
+concrete payoff, not just documentation.
+
+The [Kaitai Struct format gallery](https://formats.kaitai.io) has dozens
+more worked, compilable specs for exactly this domain -- `doom_wad`,
+`allegro_dat`, `dune_2_pak`, `fallout_dat`/`fallout2_dat`, `ftl_dat`,
+`heaps_pak`, `saints_row_2_vpp_pc` -- worth a look for a shape close to
+whatever container you're recovering before writing a `.ksy` from scratch.
 
 ---
 
