@@ -1133,10 +1133,43 @@ description doubling as an extractor for the *data* it describes -- is the
 concrete payoff, not just documentation.
 
 The [Kaitai Struct format gallery](https://formats.kaitai.io) has dozens
-more worked, compilable specs for exactly this domain -- `doom_wad`,
-`allegro_dat`, `dune_2_pak`, `fallout_dat`/`fallout2_dat`, `ftl_dat`,
-`heaps_pak`, `saints_row_2_vpp_pc` -- worth a look for a shape close to
-whatever container you're recovering before writing a `.ksy` from scratch.
+more worked, compilable specs in this vein -- `doom_wad`, `allegro_dat`,
+`dune_2_pak`, `fallout_dat`/`fallout2_dat`, `ftl_dat`, `heaps_pak`,
+`saints_row_2_vpp_pc` -- but a real bespoke game-engine format (confirmed
+against one actual case: a container format plus MFC `CArchive`-based
+object serialization inside it, both fully custom to that one engine)
+usually won't match any of them, and none of the gallery's retro-game
+containers are a substitute for actually doing sections 9/13.1/13.2's
+recovery work on a truly proprietary format. Two ways the gallery still
+earns its look, from that same real case:
+
+- **A payload inside your bespoke container may itself be a plain,
+  unmodified standard format -- check before hand-rolling a parser for
+  it.** A sibling container held literal, ready-to-view `.bmp` files, not
+  a custom pixel format; the gallery's own `bmp.ksy` (verified: compiles
+  cleanly with the same compiler) parses those directly, no bespoke work
+  needed for that layer even though the container around it is fully
+  custom.
+- **Don't reach for Kaitai to redo what another tool in your pipeline
+  already gives you structurally.** The executable itself is a PE32
+  (`microsoft_pe`/`dos_mz` describe that container), and the assets ship
+  on an ISO 9660 image (`iso9660` describes that one) -- but if `ghidra-cli`
+  (§10.2) already gives you structured header/section/import access, and
+  `7z` already extracts the ISO's files, writing a `.ksy` for either layer
+  duplicates a solved problem instead of closing a gap.
+
+**A hard scope boundary, not just a "usually doesn't apply" caveat: Kaitai
+cannot describe MFC `CArchive`-style object serialization at all**, because
+that format's structure isn't fixed by static byte layout -- it depends on
+which C++ class's `Serialize()` gets invoked at each point in the stream,
+a fact only the executable's own code (via runtime type
+dispatch/registration) knows. A `.ksy` spec has no way to express "read the
+next N bytes according to whatever type this runtime tag says" without
+already knowing the full set of types and their individual layouts, which
+is exactly the disassembly-driven recovery this skill's own sections 9-13
+do by hand. Kaitai is the right tool for the fixed-layout container
+*wrapping* such a stream (magic, offsets, lengths), not the type-dispatched
+serialization *inside* it.
 
 ---
 
