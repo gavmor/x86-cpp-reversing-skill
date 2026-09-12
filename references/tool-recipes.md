@@ -1083,33 +1083,72 @@ is now a mechanical check instead of a manual re-read.
 | 3 | Run the generated parser against **every** file in your corpus, not just the sample you reverse-engineered | No exceptions; entry counts and field values look sane across the whole corpus, not just file #1 |
 | **Exit** | The spec parses the whole corpus without a human re-reading a single hex dump | A `.ksy` file, committed alongside your notes -- executable documentation, not prose that goes stale |
 
-**For a genuinely unknown format, do step 2 in the
-[Web IDE](https://ide.kaitai.io) instead of editing blind and recompiling
-to check each guess.** Confirmed real, specific features (its own GitHub
-wiki, not marketing copy): selecting a field in the parsed tree highlights
-the exact bytes it consumed in the hex view, and vice versa -- so "is my
-guessed stride/offset right?" becomes an instant visual check instead of
-the edit → compile → run → inspect-output loop the CLI recipe above
-requires. This is precisely the check that would have caught this
-section's own wrong-stride test case (below) immediately, rather than
-requiring a deliberate second test to notice the silent desync. There are
-two versions -- `ide.kaitai.io` (stable compiler) and `ide.kaitai.io/devel`
-(latest compiler features) -- switch to `/devel` if a construct you need
-(e.g. a newer `switch-on` feature) isn't recognized on the stable one.
-Move to the CLI recipe once the spec is stable and you want to run it
-against the whole corpus unattended.
+**For a genuinely unknown format, iterate with `ksdump` instead of editing
+blind and recompiling to check each guess** (verified end-to-end this
+session: installed the `kaitai-struct-visualizer` gem via `mise`, which
+provides both `ksdump` and `ksv` -- see the setup block below):
+
+```bash
+ksdump -f json your_sample.dat your_format.ksy
+```
+
+No target-language boilerplate, no `from your_format import ...` script --
+one command re-parses the sample and prints every field as JSON on every
+edit to the `.ksy`, which is faster to iterate against than compiling to
+Python and writing an inspection script (the recipe's original step
+2/3 flow) every time you tweak a guess. Reserve the compile-to-Python step
+for once the spec is stable and you actually want to *consume* the parsed
+data programmatically (an extractor, a batch corpus check).
+
+`ksv` (same gem) and the [Web IDE](https://ide.kaitai.io) are the
+higher-bandwidth alternative when a **human** is doing this part of the
+work -- both give live, bidirectional field↔hex-byte highlighting (`ksv`'s
+own README confirms it's "interactive console visualizer with GUI," not a
+batch tool: it has no non-interactive flag, unlike `ksdump`). Neither is
+agent-drivable over a shell for the same reason IDA's interactive GUI
+script in section 10.6 isn't -- reach for `ksdump`'s JSON output in a
+pure-agent workflow, and `ksv`/the Web IDE only when handing this specific
+step to a human collaborator.
 
 **A guided approach for a format with no reference spec anywhere, distilled
-from the user guide's own recommended order (`doc.kaitai.io/user_guide.html`):**
-start with the fixed-size fields you're already sure of (magic, counts);
-find length fields next (a `u2`/`u4` immediately before variable-size
-data is the usual tell); map any tag byte/word to the types it selects
-between (`switch-on`, discussed further below); confirm a repeating region's bounds with
-`repeat: eos`/`repeat-expr` rather than a hardcoded count; and for a field
-whose meaning you haven't recovered yet, declare it as raw bytes (or an
-explicit `unknown` catch-all type) rather than blocking the whole spec on
-full comprehension up front -- an incomplete-but-honest spec that leaves
-gaps visible beats a complete-looking one with guessed field names.
+from the user guide's own recommended order (`doc.kaitai.io/user_guide.html`)
+and a real worked example (Hilts, "Extracting Sprite Data w/ Unix Tools &
+Kaitai Struct," 2016 -- verified: the technique below is exactly what let
+that post derive a record count with zero disassembly):**
+
+- Start with the fixed-size fields you're already sure of (magic, counts).
+- Find length fields next (a `u2`/`u4` immediately before variable-size
+  data is the usual tell).
+- **If a companion file (an already-decoded image, a sibling asset) gives
+  you an externally-known count or dimension, use plain arithmetic on the
+  container's own file size before assuming you need disassembly at all:**
+  `(filesize - header_size) / known_count = record_stride`. Cross-check
+  the same arithmetic against a *second* sample with a different file size
+  and a different externally-known count -- if the same stride falls out
+  both times, that's real corroboration, not a coincidence from one file
+  (same source: a 32770-byte and a 4098-byte sample both resolved to a
+  512-byte stride this way).
+- Map any tag byte/word to the types it selects between (`switch-on`,
+  discussed further below).
+- **A field that increments by a constant step across consecutive records,
+  visible directly in `ksdump`'s JSON output once `repeat` is declared, is
+  the signature of a per-record index/counter field** -- worth checking
+  before assuming an unexplained numeric field is arbitrary data. The same
+  post's caution applies before trusting the pattern too far: re-run
+  against a second sample and check the sequence still holds the same way
+  (in that case, it didn't -- a second file's "index" field was instead
+  full of a filler value, which is itself a finding, not a failure of the
+  technique).
+- Confirm a repeating region's bounds with `repeat: eos`/`repeat-expr`
+  rather than a hardcoded count.
+- For a field whose meaning you haven't recovered yet, declare it as raw
+  bytes (or an explicit `unknown` catch-all type) rather than blocking the
+  whole spec on full comprehension up front -- an incomplete-but-honest
+  spec that leaves gaps visible beats a complete-looking one with guessed
+  field names. **A guess from data-only inspection like this has no
+  rigorous proof, only corroborating evidence** -- disassembling the
+  loader (sections 9/13.1/13.2) is still the only way to actually confirm
+  it, not just a fallback for when guessing fails.
 
 Once you're past guessing and actually writing the spec, follow
 `references/kaitai-ksy-style-guide.md` (the official style guide,
@@ -1123,6 +1162,14 @@ naming inconsistencies into your spec.
 # (didn't test the actual minimum version; it's JVM-based, so some JDK must be on PATH or at JAVA_HOME)
 curl -sL -o ksc.zip "https://github.com/kaitai-io/kaitai_struct_compiler/releases/download/0.11/kaitai-struct-compiler-0.11.zip"
 unzip -q ksc.zip && rm ksc.zip
+
+# ksdump/ksv need Ruby -- verified via mise (no root needed) rather than apt/pkexec:
+mise use -g ruby@3
+gem install kaitai-struct-visualizer   # provides ksdump and ksv, both on PATH after this
+# confirmed gotcha: both shell out to `kaitai-struct-compiler` -- if it's not
+# separately on PATH, ksv fails with "unable to find and execute kaitai-struct-compiler
+# in your PATH" even though the gem installed cleanly
+
 pip install kaitaistruct   # runtime needed to actually load the generated parser in Python
 
 ./kaitai-struct-compiler-0.11/bin/kaitai-struct-compiler --target python your_format.ksy
