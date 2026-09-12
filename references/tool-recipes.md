@@ -1111,6 +1111,13 @@ explicit `unknown` catch-all type) rather than blocking the whole spec on
 full comprehension up front -- an incomplete-but-honest spec that leaves
 gaps visible beats a complete-looking one with guessed field names.
 
+Once you're past guessing and actually writing the spec, follow
+`references/kaitai-ksy-style-guide.md` (the official style guide,
+reproduced verbatim) for key ordering and naming conventions -- in
+particular its `ofs_`/`len_`/`num_` field-naming rules and its guidance on
+transcribing an existing C struct (§8) without copying that struct's own
+naming inconsistencies into your spec.
+
 ```bash
 # one-time setup -- verified working end-to-end this session against a JDK 21 install
 # (didn't test the actual minimum version; it's JVM-based, so some JDK must be on PATH or at JAVA_HOME)
