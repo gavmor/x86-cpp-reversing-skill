@@ -72,6 +72,40 @@ would be on Itanium/Linux binaries.
 - **Order of execution:** Base constructors run before derived constructors;
   derived destructors run before base destructors.
 
+**Locating the constructor call in the first place depends on how the
+object was allocated** (Sabanal & Yason, §II-B.1):
+
+| Allocation shape | Constructor tell |
+|---|---|
+| Global object | `this` is a fixed global address, and the call using it as `this` lies on the path between the program's entry point and `main()` -- global constructors run during CRT startup, before `main` |
+| Local (stack) object | `this` points to a stack slot that's read as `this` *without having been written* anywhere earlier in the function -- an uninitialized stack variable used as `this` is the tell |
+| Dynamically allocated object | Immediately preceded by a call to `operator new`; the returned pointer (EAX) is moved into ECX right before the very next call that uses it as `this` |
+
+**Multiple-inheritance base offsets, read directly off the constructor --
+no RTTI needed.** In a derived class's constructor, each base-class
+constructor call adds that base's byte offset to `this` before the call:
+
+```asm
+mov  ecx, [ebp+var_4]     ; this
+call BaseA_ctor           ; first base -- offset 0, no adjustment
+mov  ecx, [ebp+var_4]
+add  ecx, 4               ; <-- this 4 IS BaseC's offset within the derived object
+call BaseC_ctor
+```
+
+This derives the exact same fact `BaseClassDescriptor.mdisp` encodes (see
+above), independently and without RTTI -- cross-check the two against each
+other when both are available, and fall back to this when RTTI is stripped
+or wasn't compiled in at all.
+
+**Overloaded constructors will masquerade as separate classes if you only
+track `this`-argument shape.** Multiple candidate constructors that turn
+out to share the same vftable and member-function set are overloads of one
+constructor, not distinct classes. Disambiguator (same source): the size
+argument passed to `operator new` is unique per class in the overwhelming
+majority of cases, so group candidate constructors by that size first --
+same-size, same-vftable candidates are overloads, not separate classes.
+
 ## Name mangling
 
 MSVC mangled names start with `?`. Key markers to recognize without a demangler:
@@ -175,6 +209,18 @@ struct RTTIBaseClassDescriptor {
 `RTTIBaseClassArray` is simply a flat array of 32-bit virtual addresses pointing to
 `RTTIBaseClassDescriptor` structures for the class itself and every base in its
 inheritance closure.
+
+**That "every base in its inheritance closure" phrasing matters when you
+want *direct* bases specifically, not the whole closure -- don't read the
+array's length as the direct-base count.** For `ClassC : ClassB : ClassA`,
+`ClassC`'s own array contains a `BaseClassDescriptor` for `ClassA` too, even
+though `ClassA` is `ClassB`'s base, not `ClassC`'s directly (Sabanal &
+Yason, §II-D.2). `RTTIBaseClassDescriptor.numContainedBases` (see above) is
+what disambiguates this without re-opening each base's own
+`ClassHierarchyDescriptor`: walking the array in order, an entry with
+`numContainedBases = N` owns the next `N` entries in the array as its own
+transitive bases -- so a direct base of the class under analysis is
+exactly an entry not already consumed as some earlier entry's descendant.
 
 ## The Self-Referencing Validation Invariant (`rTTISelfRef`)
 

@@ -140,6 +140,21 @@ gdb -q ./test32                        # or objdump/recon.py the result
 directly (`objdump --dwarf=decodedline`), which is often faster than
 reasoning from the assembly alone when you control the source.
 
+**For MSVC/PE targets, `cl.exe` will print the ground-truth layout directly
+instead of making you reconstruct it from disassembly at all** -- an
+undocumented but real, independently-corroborated flag (Sabanal & Yason;
+also documented by Ofek Shilon and others):
+
+```
+cl /d1reportAllClassLayout test.cpp        # every class in the translation unit
+cl /d1reportSingleClassLayout:ClassName test.cpp   # just one class, by name
+```
+
+Emits offsets of every base class, the vftable, and each member, in the
+exact `references/msvc-abi.md` notation this skill already uses -- the
+fastest way to get a known-correct answer to check a manual or automated
+recovery against when you have (or can borrow) a Windows box with MSVC.
+
 **If you compile your reference at a higher `-O` level to match an
 optimized target, expect functions to vanish or merge, not just get
 harder to read.** REFORGE (Koller & Schmidt, §4.2) measured *why*
