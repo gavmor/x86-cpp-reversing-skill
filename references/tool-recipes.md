@@ -1269,12 +1269,19 @@ earns its look, from that same real case:
 cannot *discover* MFC `CArchive`-style object serialization's dispatch on
 its own**, because which C++ class's `Serialize()` runs at each point in
 the stream is a fact only the executable's own code (via runtime type
-dispatch/registration, e.g. `IMPLEMENT_SERIAL`'s class-schema tag) knows --
-that discovery is exactly the disassembly-driven recovery this skill's own
-sections 9-13 do by hand, and no `.ksy` spec can shortcut it. **But once
-that recovery is done and the finite set of classes a given tag can select
-among is known, `switch-on` (verified real: `doc.kaitai.io/user_guide.html`
-§5) is precisely the construct for expressing it:**
+dispatch/registration, e.g. `IMPLEMENT_SERIAL`'s class-schema tag) knows.
+`references/mfc-carchive-serialization.md` has the concrete mechanics,
+verified against real MFC source: the on-disk class-tag wire format
+(so you can recognize it directly in a real archive file's bytes), the
+exact `CRuntimeClass` struct layout, and a static xref sweep
+(`AfxClassInit`) that enumerates every serializable class and its schema
+number in one pass -- notably, recovering *that* part turns out to be a
+mechanical static sweep, not full disassembly-driven inference; it's only
+each individual class's own `Serialize()` field layout that's genuinely
+bespoke and needs sections 9/13.1/13.2's recovery work. **Once that's
+done and the finite set of classes a given tag can select among is known,
+`switch-on` (verified real: `doc.kaitai.io/user_guide.html` §5) is
+precisely the construct for expressing it:**
 
 ```yaml
 - id: class_tag
