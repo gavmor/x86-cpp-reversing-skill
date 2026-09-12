@@ -1083,6 +1083,34 @@ is now a mechanical check instead of a manual re-read.
 | 3 | Run the generated parser against **every** file in your corpus, not just the sample you reverse-engineered | No exceptions; entry counts and field values look sane across the whole corpus, not just file #1 |
 | **Exit** | The spec parses the whole corpus without a human re-reading a single hex dump | A `.ksy` file, committed alongside your notes -- executable documentation, not prose that goes stale |
 
+**For a genuinely unknown format, do step 2 in the
+[Web IDE](https://ide.kaitai.io) instead of editing blind and recompiling
+to check each guess.** Confirmed real, specific features (its own GitHub
+wiki, not marketing copy): selecting a field in the parsed tree highlights
+the exact bytes it consumed in the hex view, and vice versa -- so "is my
+guessed stride/offset right?" becomes an instant visual check instead of
+the edit → compile → run → inspect-output loop the CLI recipe above
+requires. This is precisely the check that would have caught this
+section's own wrong-stride test case (below) immediately, rather than
+requiring a deliberate second test to notice the silent desync. There are
+two versions -- `ide.kaitai.io` (stable compiler) and `ide.kaitai.io/devel`
+(latest compiler features) -- switch to `/devel` if a construct you need
+(e.g. a newer `switch-on` feature) isn't recognized on the stable one.
+Move to the CLI recipe once the spec is stable and you want to run it
+against the whole corpus unattended.
+
+**A guided approach for a format with no reference spec anywhere, distilled
+from the user guide's own recommended order (`doc.kaitai.io/user_guide.html`):**
+start with the fixed-size fields you're already sure of (magic, counts);
+find length fields next (a `u2`/`u4` immediately before variable-size
+data is the usual tell); map any tag byte/word to the types it selects
+between (`switch-on`, discussed further below); confirm a repeating region's bounds with
+`repeat: eos`/`repeat-expr` rather than a hardcoded count; and for a field
+whose meaning you haven't recovered yet, declare it as raw bytes (or an
+explicit `unknown` catch-all type) rather than blocking the whole spec on
+full comprehension up front -- an incomplete-but-honest spec that leaves
+gaps visible beats a complete-looking one with guessed field names.
+
 ```bash
 # one-time setup -- verified working end-to-end this session against a JDK 21 install
 # (didn't test the actual minimum version; it's JVM-based, so some JDK must be on PATH or at JAVA_HOME)
@@ -1103,6 +1131,31 @@ for e in f.entries:
 literally `.`) throws a spurious `. (Is a directory)` error and re-invokes
 itself once** -- omit `-d` (or point it at a real subdirectory) and it
 compiles cleanly on the first try.
+
+**If a field's name or your own analysis says "compressed" or
+"obfuscated," check `process:` before writing a manual decompression
+step.** Verified directly against the compiler's own compiled classes,
+not just the docs (which only walk through one example): the built-in
+transforms are `xor(key)`, `rol(n)`/`ror(n)` for simple obfuscation, and
+`zlib` for standard zlib-compressed payloads:
+```yaml
+- id: body
+  size: body_len
+  process: zlib
+  type: some_body_type   # parses the DEcompressed bytes, not the raw ones
+```
+When the compression is bespoke rather than standard, `process:` also
+accepts an arbitrary custom name (`process:
+my_custom_decompressor(key)`), which the compiler treats as a call out to
+a class you hand-write yourself in the target language, implementing
+whatever decompress/decrypt routine you've already worked out from the
+loader's disassembly -- confirmed real (`doc.kaitai.io/user_guide.html`
+§7.6, "feature available since v0.8"), not a fixed keyword like `zlib`.
+If the built-in `zlib` fails outright, that's itself informative -- it
+usually means either the field boundaries around the compressed blob are
+wrong (recheck the stride/offset first) or the compression really is a
+custom variant, in which case the custom-process escape hatch above is
+the fallback, not a sign Kaitai doesn't apply here.
 
 **Confirmed the hard way: a wrong stride does not necessarily throw an
 error.** An `entry` type declared one field short (8 bytes instead of the
@@ -1158,18 +1211,36 @@ earns its look, from that same real case:
   `7z` already extracts the ISO's files, writing a `.ksy` for either layer
   duplicates a solved problem instead of closing a gap.
 
-**A hard scope boundary, not just a "usually doesn't apply" caveat: Kaitai
-cannot describe MFC `CArchive`-style object serialization at all**, because
-that format's structure isn't fixed by static byte layout -- it depends on
-which C++ class's `Serialize()` gets invoked at each point in the stream,
-a fact only the executable's own code (via runtime type
-dispatch/registration) knows. A `.ksy` spec has no way to express "read the
-next N bytes according to whatever type this runtime tag says" without
-already knowing the full set of types and their individual layouts, which
-is exactly the disassembly-driven recovery this skill's own sections 9-13
-do by hand. Kaitai is the right tool for the fixed-layout container
-*wrapping* such a stream (magic, offsets, lengths), not the type-dispatched
-serialization *inside* it.
+**A real scope boundary, though less absolute than it first looks: Kaitai
+cannot *discover* MFC `CArchive`-style object serialization's dispatch on
+its own**, because which C++ class's `Serialize()` runs at each point in
+the stream is a fact only the executable's own code (via runtime type
+dispatch/registration, e.g. `IMPLEMENT_SERIAL`'s class-schema tag) knows --
+that discovery is exactly the disassembly-driven recovery this skill's own
+sections 9-13 do by hand, and no `.ksy` spec can shortcut it. **But once
+that recovery is done and the finite set of classes a given tag can select
+among is known, `switch-on` (verified real: `doc.kaitai.io/user_guide.html`
+§5) is precisely the construct for expressing it:**
+
+```yaml
+- id: class_tag
+  type: u2
+- id: body
+  type:
+    switch-on: class_tag
+    cases:
+      1: compressed_object_texture   # each arm names a type you already
+      2: compressed_texture_def      # recovered separately, the same way
+      _: unknown_object              # catch-all for a tag you haven't recovered yet
+```
+
+So the honest framing is narrower than "Kaitai can't do this at all": it
+can't do the recovery step, but it's the right tool for writing down the
+recovery's *result* once you have it -- one `switch-on` arm per class,
+added incrementally as you reverse-engineer each one, with `_:
+unknown_object` (an opaque/raw-bytes catch-all) covering whatever you
+haven't gotten to yet rather than blocking the whole spec on 100% coverage
+up front.
 
 ---
 
