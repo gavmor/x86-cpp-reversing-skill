@@ -1171,6 +1171,10 @@ gem install kaitai-struct-visualizer   # provides ksdump and ksv, both on PATH a
 # in your PATH" even though the gem installed cleanly
 
 pip install kaitaistruct   # runtime needed to actually load the generated parser in Python
+# confirmed gotcha: bare `pip install` throws `error: externally-managed-environment`
+# (PEP 668) on current Debian/Ubuntu -- use `pip install --break-system-packages
+# kaitaistruct`, a venv, or `pipx install kaitaistruct` instead of assuming the plain
+# command above will just work
 
 ./kaitai-struct-compiler-0.11/bin/kaitai-struct-compiler --target python your_format.ksy
 python3 -c "
@@ -1180,6 +1184,37 @@ for e in f.entries:
     print(e.some_id, e.offset, e.size)
 "
 ```
+
+**If the pip path above is blocked and the project you're actually working
+in already uses a different language's tooling, don't default to Python
+just because this recipe's example does -- match `--target` (and the
+runtime you install) to whatever the project's own ambient stack already
+is.** The compiler itself supports `perl, java, go, cpp_stl, php, lua,
+html, ruby, construct, javascript, csharp, rust, python, nim`, and the
+compiler is also distributed as an npm package (verified: `kaitai-struct-compiler`
+on npm is the same publisher/repo/version numbering as the zip release
+above, not an unofficial mirror) for exactly this case:
+
+```bash
+pnpm add -D kaitai-struct-compiler
+# confirmed gotcha: this package has no `bin` entry, so it does NOT appear
+# under node_modules/.bin/ -- invoke the bundled JS entry point directly:
+node ./node_modules/kaitai-struct-compiler/kaitai-struct-compiler.js --target javascript your_format.ksy
+```
+
+**This isn't just the same JVM-based compiler wrapped for npm -- it's a
+genuinely different build with no Java dependency at all.** Confirmed by
+inspecting the package contents directly: `kaitai-struct-compiler.js` is a
+Scala.js-compiled bundle (the actual compiler transpiled to JavaScript,
+not a shim that shells out to `java`), and it loads and runs under plain
+`node` with `JAVA_HOME` unset and no JDK anywhere on `PATH`. For a
+project that's already JS/TS-based, this route skips the JDK-install step
+entirely -- reach for it first in that situation rather than installing a
+JVM you don't otherwise need. (`ksdump`/`ksv`, further above, still need
+the JVM-based `kaitai-struct-compiler` on `PATH` regardless of which one
+you use to actually compile specs, since they shell out to the `ksc`
+binary name specifically -- the npm build doesn't replace that dependency
+for the visualizer tools.)
 
 **Confirmed gotcha: an explicit `--target python your_format.ksy -d .` (outdir
 literally `.`) throws a spurious `. (Is a directory)` error and re-invokes
