@@ -1352,6 +1352,66 @@ different index, if their in-game object-creation order differed. See
 fixed mapping" section for the concrete failure mode and how to structure
 the spec instead.
 
+### 13.4 What a `.ksy` can't hold, and where that belongs instead
+
+A `.ksy` spec answers exactly one kind of question: what bytes are here,
+in what order, as what type. It's a description of a static byte stream,
+so it structurally cannot express a call-graph fact ("who calls this,
+and what does it spawn"), a runtime-only value ("what section/keyframe a
+live server decided to send this tick, with no file backing the decision
+at all"), or a semantic-usage fact ("does the game's code treat this
+resource as a pickup icon or a VFX effect"). None of those are properties
+of the bytes on disk -- they're properties of the executing program's
+control flow, or in the network-stream case, not properties of any file
+at rest to begin with. Enriching the `.ksy` further doesn't close that
+gap, because the missing information was never bytes on disk in the
+first place. (A `.ksy`'s `doc:`/`doc-ref` keys *can* hold a sentence like
+"used as the death-splatter fallback for `CEnemy::Terminate`" -- but
+that's inert prose riding alongside the parser, not something `seq`/
+`type`/`switch-on` compute or enforce, no different in kind from writing
+the same sentence in a separate findings file.)
+
+This isn't a new problem -- section 12's OOAnalyzer already solved the
+identical design question for a different fact category. Class-hierarchy
+facts ("class X derives from class Y," "function Z is a constructor")
+are also behavioral/code facts, not byte-layout facts, and OOAnalyzer
+represents them as structured, atomic predicates (`factDerivedClass/3`,
+`factConstructor/1`) specifically so they can be queried and
+cross-checked later, rather than trusted as prose assertions. Generalize
+that same principle -- and section 10.5's existing `evidence | owner |
+confidence | note` row shape -- to a findings record for call-graph and
+semantic-role facts:
+
+```json
+{
+  "claim": "blood1.e3 is CEnemy::Terminate's death-splatter fallback",
+  "evidence": {"address": "0x5321a4", "function": "CEnemy::Terminate", "method": "disassembly"},
+  "confidence": "confirmed",
+  "note": "called unconditionally when no enemy-specific effect is registered"
+}
+```
+
+Four things matter about this shape, each a direct lesson from elsewhere
+in this file:
+
+- **`evidence` is mandatory, not optional metadata.** A finding with no
+  traceable address/function is exactly how an inherited claim goes stale
+  and unverifiable (section 10.7's "don't trust inherited 'X calls Y'
+  claims") -- force it structurally, the same way a `.ksy`'s `valid:`
+  forces a byte constraint to actually be checked rather than assumed.
+- **`confidence` reuses section 10.5's existing small, fixed vocabulary**
+  (confirmed/inferred -- extend with hypothesis/unconfirmed if needed)
+  rather than letting every findings file invent its own certainty
+  language.
+- **`method` names *how* it was determined** (disassembly / dynamic
+  observation / cross-file correlation) so a later reader can judge
+  whether it's worth re-verifying rather than just trusting the label.
+- **Keep these physically separate from `.ksy` files** -- a `findings/`
+  directory alongside `formats/`, not one artifact type quietly trying to
+  do both jobs. The project's own layout should communicate the split:
+  `formats/` answers "what bytes, what order, what type"; `findings/`
+  answers "what does the code do with them."
+
 ---
 
 ## 14. Programmatic binary analysis recipes (Andriesse, *Practical Binary Analysis*)
